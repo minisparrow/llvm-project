@@ -2,7 +2,7 @@
 #include <iostream>
 #include <fstream>
 #include <cassert>
-#include "cuda.h"
+#include <cuda.h>
 
 
 void checkCudaErrors(CUresult err) {
