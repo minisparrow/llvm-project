@@ -1,11 +1,9 @@
 add_libc_exhaustive_testsuite(libc_math_exhaustive_tests)
 
-add_object_library(
+add_header_library(
   exhaustive_test
   HDRS
     exhaustive_test.h
-  SRCS
-    exhaustive_test.cpp
 )
 
 add_fp_unittest(
@@ -17,9 +15,11 @@ add_fp_unittest(
   SRCS
     sqrtf_test.cpp
   DEPENDS
-    libc.include.math
+    .exhaustive_test
     libc.src.math.sqrtf
     libc.src.__support.FPUtil.fp_bits
+  LINK_LIBRARIES
+    -lpthread
 )
 
 add_fp_unittest(
@@ -32,7 +32,6 @@ add_fp_unittest(
     sinf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.sinf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -49,7 +48,6 @@ add_fp_unittest(
     cosf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.cosf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -66,7 +64,6 @@ add_fp_unittest(
     sincosf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.sincosf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -83,8 +80,23 @@ add_fp_unittest(
     tanf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.tanf
+    libc.src.__support.FPUtil.fp_bits
+  LINK_LIBRARIES
+    -lpthread
+)
+
+add_fp_unittest(
+  erff_test
+  NO_RUN_POSTBUILD
+  NEED_MPFR
+  SUITE
+    libc_math_exhaustive_tests
+  SRCS
+    erff_test.cpp
+  DEPENDS
+    .exhaustive_test
+    libc.src.math.erff
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
     -lpthread
@@ -100,7 +112,6 @@ add_fp_unittest(
     expf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.expf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -117,9 +128,23 @@ add_fp_unittest(
     exp2f_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.exp2f
     libc.src.__support.FPUtil.fp_bits
+  LINK_LIBRARIES
+    -lpthread
+)
+
+add_fp_unittest(
+  exp2m1f_test
+  NO_RUN_POSTBUILD
+  NEED_MPFR
+  SUITE
+    libc_math_exhaustive_tests
+  SRCS
+    exp2m1f_test.cpp
+  DEPENDS
+    .exhaustive_test
+    libc.src.math.exp2m1f
   LINK_LIBRARIES
     -lpthread
 )
@@ -134,7 +159,6 @@ add_fp_unittest(
     exp10f_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.exp10f
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -151,7 +175,6 @@ add_fp_unittest(
     expm1f_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.expm1f
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -168,7 +191,6 @@ add_fp_unittest(
     logf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.logf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -185,7 +207,6 @@ add_fp_unittest(
     log10f_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.log10f
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -202,7 +223,6 @@ add_fp_unittest(
     log1pf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.log1pf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -219,7 +239,6 @@ add_fp_unittest(
     log2f_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.log2f
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -238,7 +257,6 @@ add_fp_unittest(
     -O3
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.hypotf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -255,6 +273,7 @@ add_fp_unittest(
     fmod_generic_impl_test.cpp
   DEPENDS
     libc.src.__support.FPUtil.fp_bits
+    libc.src.__support.FPUtil.manipulation_functions
     libc.src.__support.FPUtil.generic.fmod
 )
 
@@ -268,7 +287,6 @@ add_fp_unittest(
     coshf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.coshf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -285,7 +303,6 @@ add_fp_unittest(
     sinhf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.sinhf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -302,7 +319,6 @@ add_fp_unittest(
     tanhf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.tanhf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -319,7 +335,6 @@ add_fp_unittest(
     acoshf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.acoshf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -336,7 +351,6 @@ add_fp_unittest(
     asinhf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.asinhf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -353,7 +367,6 @@ add_fp_unittest(
     atanhf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.atanhf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -370,7 +383,6 @@ add_fp_unittest(
     atanf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.atanf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -387,7 +399,6 @@ add_fp_unittest(
     asinf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.asinf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES
@@ -404,7 +415,6 @@ add_fp_unittest(
     acosf_test.cpp
   DEPENDS
     .exhaustive_test
-    libc.include.math
     libc.src.math.acosf
     libc.src.__support.FPUtil.fp_bits
   LINK_LIBRARIES

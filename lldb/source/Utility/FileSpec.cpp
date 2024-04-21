@@ -12,6 +12,7 @@
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/ErrorOr.h"
@@ -307,9 +308,9 @@ bool FileSpec::Match(const FileSpec &pattern, const FileSpec &file) {
 
 std::optional<FileSpec::Style>
 FileSpec::GuessPathStyle(llvm::StringRef absolute_path) {
-  if (absolute_path.startswith("/"))
+  if (absolute_path.starts_with("/"))
     return Style::posix;
-  if (absolute_path.startswith(R"(\\)"))
+  if (absolute_path.starts_with(R"(\\)"))
     return Style::windows;
   if (absolute_path.size() >= 3 && llvm::isAlpha(absolute_path[0]) &&
       (absolute_path.substr(1, 2) == R"(:\)" ||
@@ -463,6 +464,26 @@ bool FileSpec::RemoveLastPathComponent() {
   }
   return false;
 }
+
+std::vector<llvm::StringRef> FileSpec::GetComponents() const {
+  std::vector<llvm::StringRef> components;
+
+  auto dir_begin = llvm::sys::path::begin(m_directory.GetStringRef(), m_style);
+  auto dir_end = llvm::sys::path::end(m_directory.GetStringRef());
+
+  for (auto iter = dir_begin; iter != dir_end; ++iter) {
+    if (*iter == "/" || *iter == ".")
+      continue;
+
+    components.push_back(*iter);
+  }
+
+  if (!m_filename.IsEmpty() && m_filename != "/" && m_filename != ".")
+    components.push_back(m_filename.GetStringRef());
+
+  return components;
+}
+
 /// Returns true if the filespec represents an implementation source
 /// file (files with a ".c", ".cpp", ".m", ".mm" (many more)
 /// extension).

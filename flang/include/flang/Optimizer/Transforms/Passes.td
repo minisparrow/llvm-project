@@ -145,7 +145,8 @@ def CharacterConversion : Pass<"character-conversion"> {
   ];
 }
 
-def CFGConversion : Pass<"cfg-conversion", "::mlir::func::FuncOp"> {
+class CFGConversionBase<string optExt, string operation>
+  : Pass<"cfg-conversion-on-" # optExt # "-opt", operation> {
   let summary = "Convert FIR structured control flow ops to CFG ops.";
   let description = [{
     Transform the `fir.do_loop`, `fir.if`, `fir.iterate_while` and
@@ -154,7 +155,6 @@ def CFGConversion : Pass<"cfg-conversion", "::mlir::func::FuncOp"> {
 
     This pass is required before code gen to the LLVM IR dialect.
   }];
-  let constructor = "::fir::createFirToCfgPass()";
   let dependentDialects = [
     "fir::FIROpsDialect", "mlir::func::FuncDialect"
   ];
@@ -165,6 +165,14 @@ def CFGConversion : Pass<"cfg-conversion", "::mlir::func::FuncOp"> {
   ];
 }
 
+def CFGConversionOnFunc : CFGConversionBase<"func", "mlir::func::FuncOp"> {
+  let constructor = "::fir::createFirToCfgOnFuncPass()";
+}
+
+def CFGConversionOnReduction : CFGConversionBase<"reduce", "mlir::omp::DeclareReductionOp"> {
+  let constructor = "::fir::createFirToCfgOnReductionPass()";
+}
+
 def ExternalNameConversion : Pass<"external-name-interop", "mlir::ModuleOp"> {
   let summary = "Convert name for external interoperability";
   let description = [{
@@ -172,7 +180,7 @@ def ExternalNameConversion : Pass<"external-name-interop", "mlir::ModuleOp"> {
   }];
   let constructor = "::fir::createExternalNameConversionPass()";
   let options = [
-    Option<"appendUnderscore", "append-underscore",
+    Option<"appendUnderscoreOpt", "append-underscore",
            "bool", /*default=*/"true",
            "Append trailing underscore to external names.">
   ];
@@ -193,12 +201,12 @@ def MemRefDataFlowOpt : Pass<"fir-memref-dataflow-opt", "::mlir::func::FuncOp"> 
 
 // This needs to be a "mlir::ModuleOp" pass, because we are creating debug for
 // the module in this pass.
-def AddDebugFoundation : Pass<"add-debug-foundation", "mlir::ModuleOp"> {
-  let summary = "Add the foundation for debug info";
+def AddDebugInfo : Pass<"add-debug-info", "mlir::ModuleOp"> {
+  let summary = "Add the debug info";
   let description = [{
-    Add the foundation for emitting debug info that can be understood by llvm.
+    Emit debug info that can be understood by llvm.
   }];
-  let constructor = "::fir::createAddDebugFoundationPass()";
+  let constructor = "::fir::createAddDebugInfoPass()";
   let dependentDialects = [
     "fir::FIROpsDialect", "mlir::func::FuncDialect", "mlir::LLVM::LLVMDialect"
   ];
@@ -252,6 +260,26 @@ def StackArrays : Pass<"stack-arrays", "mlir::ModuleOp"> {
   let constructor = "::fir::createStackArraysPass()";
 }
 
+def AddAliasTags : Pass<"fir-add-alias-tags", "mlir::ModuleOp"> {
+  let summary = "Add tbaa tags to operations that implement FirAliasAnalysisOpInterface";
+  let description = [{
+    TBAA (type based alias analysis) is one method to pass pointer alias information
+    from language frontends to LLVM. This pass uses fir::AliasAnalysis to add this
+    information to fir.load and fir.store operations.
+    Additional tags are added during codegen. See fir::TBAABuilder.
+    This needs to be a separate pass so that it happens before structured control
+    flow operations are lowered to branches and basic blocks (this makes tracing
+    the source of values much eaiser). The other TBAA tags need to be applied to
+    box loads and stores which are implicit in FIR and so cannot be annotated
+    until codegen.
+    TODO: this is currently a pass on mlir::ModuleOp to avoid parallelism. In
+    theory, each operation could be considered in prallel, so long as there
+    aren't races adding new tags to the mlir context.
+  }];
+  let dependentDialects = [ "fir::FIROpsDialect" ];
+  let constructor = "::fir::createAliasTagsPass()";
+}
+
 def SimplifyRegionLite : Pass<"simplify-region-lite", "mlir::ModuleOp"> {
   let summary = "Region simplification";
   let description = [{
@@ -296,6 +324,85 @@ def LoopVersioning : Pass<"loop-versioning", "mlir::func::FuncOp"> {
   }];
   let constructor = "::fir::createLoopVersioningPass()";
   let dependentDialects = [ "fir::FIROpsDialect" ];
+}
+
+def OMPDescriptorMapInfoGenPass
+    : Pass<"omp-descriptor-map-info-gen", "mlir::func::FuncOp"> {
+  let summary = "expands OpenMP MapInfo operations containing descriptors";
+  let description = [{
+    Expands MapInfo operations containing descriptor types into multiple 
+    MapInfo's for each pointer element in the descriptor that requires 
+    explicit individual mapping by the OpenMP runtime.
+  }];
+  let constructor = "::fir::createOMPDescriptorMapInfoGenPass()";
+  let dependentDialects = ["mlir::omp::OpenMPDialect"];
+}
+
+def OMPMarkDeclareTargetPass
+    : Pass<"omp-mark-declare-target", "mlir::ModuleOp"> {
+  let summary = "Marks all functions called by an OpenMP declare target function as declare target";
+  let constructor = "::fir::createOMPMarkDeclareTargetPass()";
+  let dependentDialects = ["mlir::omp::OpenMPDialect"];
+}
+
+def OMPFunctionFiltering : Pass<"omp-function-filtering"> {
+  let summary = "Filters out functions intended for the host when compiling "
+                "for the target device.";
+  let constructor = "::fir::createOMPFunctionFilteringPass()";
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "fir::FIROpsDialect"
+  ];
+}
+
+def VScaleAttr : Pass<"vscale-attr", "mlir::func::FuncOp"> {
+  let summary = "Add vscale_range attribute to functions";
+  let description = [{
+     Set an attribute for the vscale range on functions, to allow scalable
+     vector operations to be used on processors with variable vector length.
+  }];
+  let options = [
+    Option<"vscaleRange", "vscale-range",
+           "std::pair<unsigned, unsigned>", /*default=*/"std::pair<unsigned, unsigned>{}",
+           "vector scale range">,
+  ];
+  let constructor = "::fir::createVScaleAttrPass()";
+}
+
+def FunctionAttr : Pass<"function-attr", "mlir::func::FuncOp"> {
+  let summary = "Pass that adds function attributes expected at LLVM IR level";
+  let description = [{ This feature introduces a general attribute aimed at
+     customizing function characteristics. 
+     Options include:
+     Add "frame-pointer" attribute to functions: Set an attribute for the frame 
+     pointer on functions, to avoid saving the frame pointer in a register in 
+     functions where it is unnecessary. This eliminates the need for
+     instructions to save, establish, and restore frame pointers, while also
+     freeing up an additional register in numerous functions. However, this
+     approach can make debugging unfeasible on certain machines.
+  }];
+  let options = [
+    Option<"framePointerKind", "frame-pointer",
+           "mlir::LLVM::framePointerKind::FramePointerKind", 
+           /*default=*/"mlir::LLVM::framePointerKind::FramePointerKind{}",
+           "frame pointer">,
+    Option<"noInfsFPMath", "no-infs-fp-math",
+           "bool", /*default=*/"false",
+           "Set the no-infs-fp-math attribute on functions in the module.">,
+    Option<"noNaNsFPMath", "no-nans-fp-math",
+           "bool", /*default=*/"false",
+           "Set the no-nans-fp-math attribute on functions in the module.">,
+    Option<"approxFuncFPMath", "approx-func-fp-math",
+           "bool", /*default=*/"false",
+           "Set the approx-func-fp-math attribute on functions in the module.">,
+    Option<"noSignedZerosFPMath", "no-signed-zeros-fp-math",
+           "bool", /*default=*/"false",
+           "Set the no-signed-zeros-fp-math attribute on functions in the module.">,
+    Option<"unsafeFPMath", "unsafe-fp-math",
+           "bool", /*default=*/"false",
+           "Set the unsafe-fp-math attribute on functions in the module.">,
+  ];
+  let constructor = "::fir::createFunctionAttrPass()";
 }
 
 #endif // FLANG_OPTIMIZER_TRANSFORMS_PASSES

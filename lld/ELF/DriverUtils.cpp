@@ -43,9 +43,7 @@ using namespace lld::elf;
 
 // Create table mapping all options defined in Options.td
 static constexpr opt::OptTable::Info optInfo[] = {
-#define OPTION(X1, X2, ID, KIND, GROUP, ALIAS, X7, X8, X9, X10, X11, X12)      \
-  {X1, X2, X10,         X11,         OPT_##ID, opt::Option::KIND##Class,       \
-   X9, X8, OPT_##GROUP, OPT_##ALIAS, X7,       X12},
+#define OPTION(...) LLVM_CONSTRUCT_OPT_INFO(__VA_ARGS__),
 #include "Options.inc"
 #undef OPTION
 };
@@ -188,6 +186,7 @@ std::string elf::createResponseFile(const opt::InputArgList &args) {
       os << arg->getSpelling() << quote(rewritePath(arg->getValue())) << "\n";
       break;
     case OPT_call_graph_ordering_file:
+    case OPT_default_script:
     case OPT_dynamic_list:
     case OPT_export_dynamic_symbol_list:
     case OPT_just_symbols:
@@ -206,7 +205,7 @@ std::string elf::createResponseFile(const opt::InputArgList &args) {
       os << toString(*arg) << "\n";
     }
   }
-  return std::string(data.str());
+  return std::string(data);
 }
 
 // Find a file by concatenating given paths. If a resulting path
@@ -214,7 +213,7 @@ std::string elf::createResponseFile(const opt::InputArgList &args) {
 static std::optional<std::string> findFile(StringRef path1,
                                            const Twine &path2) {
   SmallString<128> s;
-  if (path1.startswith("="))
+  if (path1.starts_with("="))
     path::append(s, config->sysroot, path1.substr(1), path2);
   else
     path::append(s, path1, path2);
@@ -247,7 +246,7 @@ std::optional<std::string> elf::searchLibraryBaseName(StringRef name) {
 // This is for -l<namespec>.
 std::optional<std::string> elf::searchLibrary(StringRef name) {
   llvm::TimeTraceScope timeScope("Locate library", name);
-  if (name.startswith(":"))
+  if (name.starts_with(":"))
     return findFromSearchPaths(name.substr(1));
   return searchLibraryBaseName(name);
 }

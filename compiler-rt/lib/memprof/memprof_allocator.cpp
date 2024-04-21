@@ -23,6 +23,7 @@
 #include "sanitizer_common/sanitizer_allocator_checks.h"
 #include "sanitizer_common/sanitizer_allocator_interface.h"
 #include "sanitizer_common/sanitizer_allocator_report.h"
+#include "sanitizer_common/sanitizer_array_ref.h"
 #include "sanitizer_common/sanitizer_common.h"
 #include "sanitizer_common/sanitizer_errno.h"
 #include "sanitizer_common/sanitizer_file.h"
@@ -189,6 +190,7 @@ void MemprofMapUnmapCallback::OnMap(uptr p, uptr size) const {
   thread_stats.mmaps++;
   thread_stats.mmaped += size;
 }
+
 void MemprofMapUnmapCallback::OnUnmap(uptr p, uptr size) const {
   // We are about to unmap a chunk of user memory.
   // Mark the corresponding shadow memory as not needed.
@@ -513,8 +515,7 @@ struct Allocator {
     return ptr;
   }
 
-  void CommitBack(MemprofThreadLocalMallocStorage *ms,
-                  BufferedStackTrace *stack) {
+  void CommitBack(MemprofThreadLocalMallocStorage *ms) {
     AllocatorCache *ac = GetAllocatorCache(ms);
     allocator.SwallowCache(ac);
   }
@@ -559,7 +560,7 @@ struct Allocator {
     return reinterpret_cast<MemprofChunk *>(p - kChunkHeaderSize)->UsedSize();
   }
 
-  void Purge(BufferedStackTrace *stack) { allocator.ForceReleaseToOS(); }
+  void Purge() { allocator.ForceReleaseToOS(); }
 
   void PrintStats() { allocator.PrintStats(); }
 
@@ -581,8 +582,7 @@ static MemprofAllocator &get_allocator() { return instance.allocator; }
 void InitializeAllocator() { instance.InitLinkerInitialized(); }
 
 void MemprofThreadLocalMallocStorage::CommitBack() {
-  GET_STACK_TRACE_MALLOC;
-  instance.CommitBack(this, &stack);
+  instance.CommitBack(this);
 }
 
 void PrintInternalAllocatorStats() { instance.PrintStats(); }
@@ -697,7 +697,7 @@ static const void *memprof_malloc_begin(const void *p) {
   return (const void *)m->Beg();
 }
 
-uptr memprof_malloc_usable_size(const void *ptr, uptr pc, uptr bp) {
+uptr memprof_malloc_usable_size(const void *ptr) {
   if (!ptr)
     return 0;
   uptr usable_size = instance.AllocationSize(reinterpret_cast<uptr>(ptr));
@@ -712,7 +712,7 @@ using namespace __memprof;
 uptr __sanitizer_get_estimated_allocated_size(uptr size) { return size; }
 
 int __sanitizer_get_ownership(const void *p) {
-  return memprof_malloc_usable_size(p, 0, 0) != 0;
+  return memprof_malloc_usable_size(p) != 0;
 }
 
 const void *__sanitizer_get_allocated_begin(const void *p) {
@@ -720,7 +720,7 @@ const void *__sanitizer_get_allocated_begin(const void *p) {
 }
 
 uptr __sanitizer_get_allocated_size(const void *p) {
-  return memprof_malloc_usable_size(p, 0, 0);
+  return memprof_malloc_usable_size(p);
 }
 
 uptr __sanitizer_get_allocated_size_fast(const void *p) {
@@ -730,9 +730,21 @@ uptr __sanitizer_get_allocated_size_fast(const void *p) {
   return ret;
 }
 
+void __sanitizer_purge_allocator() { instance.Purge(); }
+
 int __memprof_profile_dump() {
   instance.FinishAndWrite();
   // In the future we may want to return non-zero if there are any errors
   // detected during the dumping process.
   return 0;
+}
+
+void __memprof_profile_reset() {
+  if (report_file.fd != kInvalidFd && report_file.fd != kStdoutFd &&
+      report_file.fd != kStderrFd) {
+    CloseFile(report_file.fd);
+    // Setting the file descriptor to kInvalidFd ensures that we will reopen the
+    // file when invoking Write again.
+    report_file.fd = kInvalidFd;
+  }
 }

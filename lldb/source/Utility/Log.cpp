@@ -155,6 +155,21 @@ void Log::VAPrintf(const char *format, va_list args) {
   PutString(Content);
 }
 
+void Log::Formatf(llvm::StringRef file, llvm::StringRef function,
+                  const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  VAFormatf(file, function, format, args);
+  va_end(args);
+}
+
+void Log::VAFormatf(llvm::StringRef file, llvm::StringRef function,
+                    const char *format, va_list args) {
+  llvm::SmallString<64> Content;
+  lldb_private::VASprintf(Content, format, args);
+  Format(file, function, llvm::formatv("{0}", Content));
+}
+
 // Printing of errors that are not fatal.
 void Log::Error(const char *format, ...) {
   va_list args;
@@ -195,7 +210,7 @@ void Log::Warning(const char *format, ...) {
 void Log::Register(llvm::StringRef name, Channel &channel) {
   auto iter = g_channel_map->try_emplace(name, channel);
   assert(iter.second == true);
-  (void)iter;
+  UNUSED_IF_ASSERT_DISABLED(iter);
 }
 
 void Log::Unregister(llvm::StringRef name) {

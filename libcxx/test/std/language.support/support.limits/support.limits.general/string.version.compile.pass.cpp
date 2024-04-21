@@ -15,19 +15,21 @@
 
 // Test the feature test macros defined by <string>
 
-/*  Constant                                      Value
-    __cpp_lib_allocator_traits_is_always_equal    201411L [C++17]
-    __cpp_lib_char8_t                             201907L [C++20]
-    __cpp_lib_constexpr_string                    201907L [C++20]
-    __cpp_lib_erase_if                            202002L [C++20]
-    __cpp_lib_nonmember_container_access          201411L [C++17]
-    __cpp_lib_ranges_to_container                 202202L [C++23]
-    __cpp_lib_starts_ends_with                    201711L [C++20]
-    __cpp_lib_string_contains                     202011L [C++23]
-    __cpp_lib_string_resize_and_overwrite         202110L [C++23]
-    __cpp_lib_string_udls                         201304L [C++14]
-    __cpp_lib_string_view                         201606L [C++17]
-                                                  201803L [C++20]
+/*  Constant                                                Value
+    __cpp_lib_allocator_traits_is_always_equal              201411L [C++17]
+    __cpp_lib_char8_t                                       201907L [C++20]
+    __cpp_lib_constexpr_string                              201907L [C++20]
+    __cpp_lib_default_template_type_for_algorithm_values    202403L [C++26]
+    __cpp_lib_erase_if                                      202002L [C++20]
+    __cpp_lib_nonmember_container_access                    201411L [C++17]
+    __cpp_lib_ranges_to_container                           202202L [C++23]
+    __cpp_lib_starts_ends_with                              201711L [C++20]
+    __cpp_lib_string_contains                               202011L [C++23]
+    __cpp_lib_string_resize_and_overwrite                   202110L [C++23]
+    __cpp_lib_string_udls                                   201304L [C++14]
+    __cpp_lib_string_view                                   201606L [C++17]
+                                                            201803L [C++20]
+    __cpp_lib_to_string                                     202306L [C++23]
 */
 
 #include <string>
@@ -45,6 +47,10 @@
 
 # ifdef __cpp_lib_constexpr_string
 #   error "__cpp_lib_constexpr_string should not be defined before c++20"
+# endif
+
+# ifdef __cpp_lib_default_template_type_for_algorithm_values
+#   error "__cpp_lib_default_template_type_for_algorithm_values should not be defined before c++26"
 # endif
 
 # ifdef __cpp_lib_erase_if
@@ -79,6 +85,10 @@
 #   error "__cpp_lib_string_view should not be defined before c++17"
 # endif
 
+# ifdef __cpp_lib_to_string
+#   error "__cpp_lib_to_string should not be defined before c++23"
+# endif
+
 #elif TEST_STD_VER == 14
 
 # ifdef __cpp_lib_allocator_traits_is_always_equal
@@ -91,6 +101,10 @@
 
 # ifdef __cpp_lib_constexpr_string
 #   error "__cpp_lib_constexpr_string should not be defined before c++20"
+# endif
+
+# ifdef __cpp_lib_default_template_type_for_algorithm_values
+#   error "__cpp_lib_default_template_type_for_algorithm_values should not be defined before c++26"
 # endif
 
 # ifdef __cpp_lib_erase_if
@@ -128,6 +142,10 @@
 #   error "__cpp_lib_string_view should not be defined before c++17"
 # endif
 
+# ifdef __cpp_lib_to_string
+#   error "__cpp_lib_to_string should not be defined before c++23"
+# endif
+
 #elif TEST_STD_VER == 17
 
 # ifndef __cpp_lib_allocator_traits_is_always_equal
@@ -143,6 +161,10 @@
 
 # ifdef __cpp_lib_constexpr_string
 #   error "__cpp_lib_constexpr_string should not be defined before c++20"
+# endif
+
+# ifdef __cpp_lib_default_template_type_for_algorithm_values
+#   error "__cpp_lib_default_template_type_for_algorithm_values should not be defined before c++26"
 # endif
 
 # ifdef __cpp_lib_erase_if
@@ -186,6 +208,10 @@
 #   error "__cpp_lib_string_view should have the value 201606L in c++17"
 # endif
 
+# ifdef __cpp_lib_to_string
+#   error "__cpp_lib_to_string should not be defined before c++23"
+# endif
+
 #elif TEST_STD_VER == 20
 
 # ifndef __cpp_lib_allocator_traits_is_always_equal
@@ -213,6 +239,10 @@
 # endif
 # if __cpp_lib_constexpr_string != 201907L
 #   error "__cpp_lib_constexpr_string should have the value 201907L in c++20"
+# endif
+
+# ifdef __cpp_lib_default_template_type_for_algorithm_values
+#   error "__cpp_lib_default_template_type_for_algorithm_values should not be defined before c++26"
 # endif
 
 # ifndef __cpp_lib_erase_if
@@ -262,6 +292,10 @@
 #   error "__cpp_lib_string_view should have the value 201803L in c++20"
 # endif
 
+# ifdef __cpp_lib_to_string
+#   error "__cpp_lib_to_string should not be defined before c++23"
+# endif
+
 #elif TEST_STD_VER == 23
 
 # ifndef __cpp_lib_allocator_traits_is_always_equal
@@ -291,6 +325,10 @@
 #   error "__cpp_lib_constexpr_string should have the value 201907L in c++23"
 # endif
 
+# ifdef __cpp_lib_default_template_type_for_algorithm_values
+#   error "__cpp_lib_default_template_type_for_algorithm_values should not be defined before c++26"
+# endif
+
 # ifndef __cpp_lib_erase_if
 #   error "__cpp_lib_erase_if should be defined in c++23"
 # endif
@@ -305,17 +343,11 @@
 #   error "__cpp_lib_nonmember_container_access should have the value 201411L in c++23"
 # endif
 
-# if !defined(_LIBCPP_VERSION)
-#   ifndef __cpp_lib_ranges_to_container
-#     error "__cpp_lib_ranges_to_container should be defined in c++23"
-#   endif
-#   if __cpp_lib_ranges_to_container != 202202L
-#     error "__cpp_lib_ranges_to_container should have the value 202202L in c++23"
-#   endif
-# else // _LIBCPP_VERSION
-#   ifdef __cpp_lib_ranges_to_container
-#     error "__cpp_lib_ranges_to_container should not be defined because it is unimplemented in libc++!"
-#   endif
+# ifndef __cpp_lib_ranges_to_container
+#   error "__cpp_lib_ranges_to_container should be defined in c++23"
+# endif
+# if __cpp_lib_ranges_to_container != 202202L
+#   error "__cpp_lib_ranges_to_container should have the value 202202L in c++23"
 # endif
 
 # ifndef __cpp_lib_starts_ends_with
@@ -353,6 +385,19 @@
 #   error "__cpp_lib_string_view should have the value 201803L in c++23"
 # endif
 
+# if !defined(_LIBCPP_VERSION)
+#   ifndef __cpp_lib_to_string
+#     error "__cpp_lib_to_string should be defined in c++23"
+#   endif
+#   if __cpp_lib_to_string != 202306L
+#     error "__cpp_lib_to_string should have the value 202306L in c++23"
+#   endif
+# else // _LIBCPP_VERSION
+#   ifdef __cpp_lib_to_string
+#     error "__cpp_lib_to_string should not be defined because it is unimplemented in libc++!"
+#   endif
+# endif
+
 #elif TEST_STD_VER > 23
 
 # ifndef __cpp_lib_allocator_traits_is_always_equal
@@ -382,6 +427,19 @@
 #   error "__cpp_lib_constexpr_string should have the value 201907L in c++26"
 # endif
 
+# if !defined(_LIBCPP_VERSION)
+#   ifndef __cpp_lib_default_template_type_for_algorithm_values
+#     error "__cpp_lib_default_template_type_for_algorithm_values should be defined in c++26"
+#   endif
+#   if __cpp_lib_default_template_type_for_algorithm_values != 202403L
+#     error "__cpp_lib_default_template_type_for_algorithm_values should have the value 202403L in c++26"
+#   endif
+# else // _LIBCPP_VERSION
+#   ifdef __cpp_lib_default_template_type_for_algorithm_values
+#     error "__cpp_lib_default_template_type_for_algorithm_values should not be defined because it is unimplemented in libc++!"
+#   endif
+# endif
+
 # ifndef __cpp_lib_erase_if
 #   error "__cpp_lib_erase_if should be defined in c++26"
 # endif
@@ -396,17 +454,11 @@
 #   error "__cpp_lib_nonmember_container_access should have the value 201411L in c++26"
 # endif
 
-# if !defined(_LIBCPP_VERSION)
-#   ifndef __cpp_lib_ranges_to_container
-#     error "__cpp_lib_ranges_to_container should be defined in c++26"
-#   endif
-#   if __cpp_lib_ranges_to_container != 202202L
-#     error "__cpp_lib_ranges_to_container should have the value 202202L in c++26"
-#   endif
-# else // _LIBCPP_VERSION
-#   ifdef __cpp_lib_ranges_to_container
-#     error "__cpp_lib_ranges_to_container should not be defined because it is unimplemented in libc++!"
-#   endif
+# ifndef __cpp_lib_ranges_to_container
+#   error "__cpp_lib_ranges_to_container should be defined in c++26"
+# endif
+# if __cpp_lib_ranges_to_container != 202202L
+#   error "__cpp_lib_ranges_to_container should have the value 202202L in c++26"
 # endif
 
 # ifndef __cpp_lib_starts_ends_with
@@ -442,6 +494,19 @@
 # endif
 # if __cpp_lib_string_view != 201803L
 #   error "__cpp_lib_string_view should have the value 201803L in c++26"
+# endif
+
+# if !defined(_LIBCPP_VERSION)
+#   ifndef __cpp_lib_to_string
+#     error "__cpp_lib_to_string should be defined in c++26"
+#   endif
+#   if __cpp_lib_to_string != 202306L
+#     error "__cpp_lib_to_string should have the value 202306L in c++26"
+#   endif
+# else // _LIBCPP_VERSION
+#   ifdef __cpp_lib_to_string
+#     error "__cpp_lib_to_string should not be defined because it is unimplemented in libc++!"
+#   endif
 # endif
 
 #endif // TEST_STD_VER > 23

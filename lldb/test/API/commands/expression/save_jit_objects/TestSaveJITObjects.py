@@ -22,6 +22,7 @@ class SaveJITObjectsTestCase(TestBase):
             os.remove(j)
         return
 
+    @expectedFailureAll(oslist=["windows"])
     def test_save_jit_objects(self):
         self.build()
         os.chdir(self.getBuildDir())
@@ -36,7 +37,7 @@ class SaveJITObjectsTestCase(TestBase):
 
         self.cleanJITFiles()
         frame.EvaluateExpression("(void*)malloc(0x1)")
-        self.assertEquals(
+        self.assertEqual(
             self.countJITFiles(), 0, "No files emitted with save-jit-objects-dir empty"
         )
 

@@ -1,6 +1,7 @@
+// XFAIL: target={{.*}}-aix{{.*}}
+
 // Check to make sure clang is somewhat picky about -g options.
 // (Delived from debug-options.c)
-// rdar://10383444
 // RUN: %clang -### -c -save-temps -integrated-as -g %s 2>&1 \
 // RUN:   | FileCheck -check-prefix=SAVE %s
 //
@@ -18,7 +19,6 @@
 // GGDB0-NOT: -debug-info-kind=
 
 // Check to make sure clang with -g on a .s file gets passed.
-// rdar://9275556
 // RUN: %clang -### -c -integrated-as -g -x assembler %s 2>&1 \
 // RUN:   | FileCheck %s
 //
@@ -26,7 +26,6 @@
 // CHECK: "-debug-info-kind=constructor"
 
 // Check to make sure clang with -g on a .s file gets passed -dwarf-debug-producer.
-// rdar://12955296
 // RUN: %clang -### -c -integrated-as -g -x assembler %s 2>&1 \
 // RUN:   | FileCheck -check-prefix=P %s
 //
@@ -50,16 +49,16 @@
 // GDWARF64_OFF-NOT: "-gdwarf64"
 
 // Check that an error is reported if -gdwarf64 cannot be used.
-// RUN: %clang -### -c -gdwarf64 -gdwarf-2 -target x86_64 -integrated-as -x assembler %s 2>&1 \
+// RUN: not %clang -### -c -gdwarf64 -gdwarf-2 --target=x86_64 -integrated-as -x assembler %s 2>&1 \
 // RUN:   | FileCheck -check-prefix=GDWARF64_VER %s
-// RUN: %clang -### -c -gdwarf64 -gdwarf-4 -target i386-linux-gnu %s 2>&1 \
+// RUN: not %clang -### -c -gdwarf64 -gdwarf-4 --target=i386-linux-gnu %s 2>&1 \
 // RUN:   | FileCheck -check-prefix=GDWARF64_32ARCH %s
-// RUN: %clang -### -c -gdwarf64 -gdwarf-4 -target x86_64-apple-darwin %s 2>&1 \
+// RUN: not %clang -### -c -gdwarf64 -gdwarf-4 -target x86_64-apple-darwin %s 2>&1 \
 // RUN:   | FileCheck -check-prefix=GDWARF64_ELF %s
 //
 // GDWARF64_VER:  error: invalid argument '-gdwarf64' only allowed with 'DWARFv3 or greater'
 // GDWARF64_32ARCH: error: invalid argument '-gdwarf64' only allowed with '64 bit architecture'
-// GDWARF64_ELF: error: invalid argument '-gdwarf64' only allowed with 'ELF/XCOFF platforms'
+// GDWARF64_ELF: error: invalid argument '-gdwarf64' only allowed with 'ELF platforms'
 
 // Check that -gdwarf-N can be placed before other options of the "-g" group.
 // RUN: %clang -### -c -g -gdwarf-3 -target %itanium_abi_triple -fintegrated-as -x assembler %s 2>&1 \

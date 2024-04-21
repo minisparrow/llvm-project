@@ -226,17 +226,17 @@ TEST_F(FIRBuilderTest, createGlobal2) {
 
 TEST_F(FIRBuilderTest, uniqueCFIdent) {
   auto str1 = fir::factory::uniqueCGIdent("", "func1");
-  EXPECT_EQ("_QQ.66756E6331", str1);
+  EXPECT_EQ("_QQX66756E6331", str1);
   str1 = fir::factory::uniqueCGIdent("", "");
-  EXPECT_EQ("_QQ.", str1);
+  EXPECT_EQ("_QQX", str1);
   str1 = fir::factory::uniqueCGIdent("pr", "func1");
-  EXPECT_EQ("_QQpr.66756E6331", str1);
+  EXPECT_EQ("_QQprX66756E6331", str1);
   str1 = fir::factory::uniqueCGIdent(
       "", "longnamemorethan32characterneedshashing");
-  EXPECT_EQ("_QQ.c22a886b2f30ea8c064ef1178377fc31", str1);
+  EXPECT_EQ("_QQXc22a886b2f30ea8c064ef1178377fc31", str1);
   str1 = fir::factory::uniqueCGIdent(
       "pr", "longnamemorethan32characterneedshashing");
-  EXPECT_EQ("_QQpr.c22a886b2f30ea8c064ef1178377fc31", str1);
+  EXPECT_EQ("_QQprXc22a886b2f30ea8c064ef1178377fc31", str1);
 }
 
 TEST_F(FIRBuilderTest, locationToLineNo) {
@@ -311,7 +311,7 @@ TEST_F(FIRBuilderTest, createStringLiteral) {
   auto symbol = addrOp.getSymbol().getRootReference().getValue();
   auto global = builder.getNamedGlobal(symbol);
   EXPECT_EQ(
-      builder.createInternalLinkage().getValue(), global.getLinkName().value());
+      builder.createLinkOnceLinkage().getValue(), global.getLinkName().value());
   EXPECT_EQ(fir::CharacterType::get(builder.getContext(), 1, strValue.size()),
       global.getType());
 

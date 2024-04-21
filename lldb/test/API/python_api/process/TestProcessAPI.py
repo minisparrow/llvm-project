@@ -49,8 +49,8 @@ class ProcessAPITestCase(TestBase):
         )
         frame = thread.GetFrameAtIndex(0)
 
-        # Get the SBValue for the global variable 'my_char'.
-        val = frame.FindValue("my_char", lldb.eValueTypeVariableGlobal)
+        # Get the SBValue for the file static variable 'my_char'.
+        val = frame.FindValue("my_char", lldb.eValueTypeVariableStatic)
         self.DebugSBValue(val)
 
         # Due to the typemap magic (see lldb.swig), we pass in 1 to ReadMemory and
@@ -149,8 +149,8 @@ class ProcessAPITestCase(TestBase):
         )
         frame = thread.GetFrameAtIndex(0)
 
-        # Get the SBValue for the global variable 'my_char'.
-        val = frame.FindValue("my_char", lldb.eValueTypeVariableGlobal)
+        # Get the SBValue for the static variable 'my_char'.
+        val = frame.FindValue("my_char", lldb.eValueTypeVariableStatic)
         self.DebugSBValue(val)
 
         # If the variable does not have a load address, there's no sense
@@ -324,7 +324,7 @@ class ProcessAPITestCase(TestBase):
 
         if self.TraceOn():
             print("process state:", state_type_to_str(process.GetState()))
-        self.assertTrue(process.GetState() != lldb.eStateConnected)
+        self.assertNotEqual(process.GetState(), lldb.eStateConnected)
 
         error = lldb.SBError()
         success = process.RemoteLaunch(

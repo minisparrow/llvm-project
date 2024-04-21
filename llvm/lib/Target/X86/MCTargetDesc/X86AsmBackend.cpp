@@ -137,14 +137,14 @@ class X86AsmBackend : public MCAsmBackend {
 
 public:
   X86AsmBackend(const Target &T, const MCSubtargetInfo &STI)
-      : MCAsmBackend(support::little), STI(STI),
+      : MCAsmBackend(llvm::endianness::little), STI(STI),
         MCII(T.createMCInstrInfo()) {
     if (X86AlignBranchWithin32BBoundaries) {
       // At the moment, this defaults to aligning fused branches, unconditional
       // jumps, and (unfused) conditional jumps with nops.  Both the
       // instructions aligned and the alignment method (nop vs prefix) may
       // change in the future.
-      AlignBoundary = assumeAligned(32);;
+      AlignBoundary = assumeAligned(32);
       AlignBranchType.addKind(X86::AlignBranchFused);
       AlignBranchType.addKind(X86::AlignBranchJcc);
       AlignBranchType.addKind(X86::AlignBranchJmp);
@@ -173,7 +173,8 @@ public:
   const MCFixupKindInfo &getFixupKindInfo(MCFixupKind Kind) const override;
 
   bool shouldForceRelocation(const MCAssembler &Asm, const MCFixup &Fixup,
-                             const MCValue &Target) override;
+                             const MCValue &Target,
+                             const MCSubtargetInfo *STI) override;
 
   void applyFixup(const MCAssembler &Asm, const MCFixup &Fixup,
                   const MCValue &Target, MutableArrayRef<char> Data,
@@ -231,20 +232,23 @@ static unsigned getRelaxedOpcode(const MCInst &MI, bool Is16BitMode) {
                                    : X86::getOpcodeForLongImmediateForm(Opcode);
 }
 
-static X86::CondCode getCondFromBranch(const MCInst &MI) {
+static X86::CondCode getCondFromBranch(const MCInst &MI,
+                                       const MCInstrInfo &MCII) {
   unsigned Opcode = MI.getOpcode();
   switch (Opcode) {
   default:
     return X86::COND_INVALID;
-  case X86::JCC_1:
+  case X86::JCC_1: {
+    const MCInstrDesc &Desc = MCII.get(Opcode);
     return static_cast<X86::CondCode>(
-        MI.getOperand(MI.getNumOperands() - 1).getImm());
+        MI.getOperand(Desc.getNumOperands() - 1).getImm());
+  }
   }
 }
 
 static X86::SecondMacroFusionInstKind
-classifySecondInstInMacroFusion(const MCInst &MI) {
-  X86::CondCode CC = getCondFromBranch(MI);
+classifySecondInstInMacroFusion(const MCInst &MI, const MCInstrInfo &MCII) {
+  X86::CondCode CC = getCondFromBranch(MI, MCII);
   return classifySecondCondCodeInMacroFusion(CC);
 }
 
@@ -351,7 +355,7 @@ bool X86AsmBackend::isMacroFused(const MCInst &Cmp, const MCInst &Jcc) const {
   const X86::FirstMacroFusionInstKind CmpKind =
       X86::classifyFirstOpcodeInMacroFusion(Cmp.getOpcode());
   const X86::SecondMacroFusionInstKind BranchKind =
-      classifySecondInstInMacroFusion(Jcc);
+      classifySecondInstInMacroFusion(Jcc, *MCII);
   return X86::isMacroFused(CmpKind, BranchKind);
 }
 
@@ -415,7 +419,7 @@ isRightAfterData(MCFragment *CurrentFragment,
   //     - If it's not the fragment where the previous instruction is,
   //       returns true.
   //     - If it's the fragment holding the previous instruction but its
-  //       size changed since the the previous instruction was emitted into
+  //       size changed since the previous instruction was emitted into
   //       it, returns true.
   //     - Otherwise returns false.
   //   - If the fragment is not a DataFragment, returns false.
@@ -566,7 +570,7 @@ void X86AsmBackend::emitInstructionEnd(MCObjectStreamer &OS, const MCInst &Inst)
   if (!needAlign(Inst) || !PendingBA)
     return;
 
-  // Tie the aligned instructions into a a pending BoundaryAlign.
+  // Tie the aligned instructions into a pending BoundaryAlign.
   PendingBA->setLastFragment(CF);
   PendingBA = nullptr;
 
@@ -642,8 +646,8 @@ const MCFixupKindInfo &X86AsmBackend::getFixupKindInfo(MCFixupKind Kind) const {
 }
 
 bool X86AsmBackend::shouldForceRelocation(const MCAssembler &,
-                                          const MCFixup &Fixup,
-                                          const MCValue &) {
+                                          const MCFixup &Fixup, const MCValue &,
+                                          const MCSubtargetInfo *STI) {
   return Fixup.getKind() >= FirstLiteralRelocationKind;
 }
 
@@ -1324,9 +1328,13 @@ public:
 
   /// Implementation of algorithm to generate the compact unwind encoding
   /// for the CFI instructions.
-  uint32_t
-  generateCompactUnwindEncoding(ArrayRef<MCCFIInstruction> Instrs) const override {
+  uint32_t generateCompactUnwindEncoding(const MCDwarfFrameInfo *FI,
+                                         const MCContext *Ctxt) const override {
+    ArrayRef<MCCFIInstruction> Instrs = FI->Instructions;
     if (Instrs.empty()) return 0;
+    if (!isDarwinCanonicalPersonality(FI->Personality) &&
+        !Ctxt->emitCompactUnwindNonCanonical())
+      return CU::UNWIND_MODE_DWARF;
 
     // Reset the saved registers.
     unsigned SavedRegIdx = 0;
@@ -1512,6 +1520,12 @@ MCAsmBackend *llvm::createX86_64AsmBackend(const Target &T,
 
   if (TheTriple.isOSWindows() && TheTriple.isOSBinFormatCOFF())
     return new WindowsX86AsmBackend(T, true, STI);
+
+  if (TheTriple.isUEFI()) {
+    assert(TheTriple.isOSBinFormatCOFF() &&
+         "Only COFF format is supported in UEFI environment.");
+    return new WindowsX86AsmBackend(T, true, STI);
+  }
 
   uint8_t OSABI = MCELFObjectTargetWriter::getOSABI(TheTriple.getOS());
 

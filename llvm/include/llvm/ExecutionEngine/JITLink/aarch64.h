@@ -176,9 +176,23 @@ enum EdgeKind_aarch64 : Edge::Kind {
   /// Errors:
   ///   - The result of the unshifted part of the fixup expression must be
   ///     32-bit aligned otherwise an alignment error will be returned.
-  ///   - The result of the fixup expression must fit into an an int19 or an
+  ///   - The result of the fixup expression must fit into an int19 or an
   ///     out-of-range error will be returned.
   LDRLiteral19,
+
+  /// The signed 21-bit delta from the fixup to the target.
+  ///
+  /// Fixup expression:
+  ///
+  ///   Fixup <- Target - Fixup + Addend : int21
+  ///
+  /// Notes:
+  ///   For ADR fixups.
+  ///
+  /// Errors:
+  ///   - The result of the fixup expression must fit into an int21 otherwise an
+  ///     out-of-range error will be returned.
+  ADRLiteral21,
 
   /// The signed 21-bit delta from the fixup page to the page containing the
   /// target.
@@ -358,6 +372,11 @@ inline bool isCompAndBranchImm19(uint32_t Instr) {
   return (Instr & CompAndBranchImm19Mask) == 0x34000000;
 }
 
+inline bool isADR(uint32_t Instr) {
+  constexpr uint32_t ADRMask = 0x9f000000;
+  return (Instr & ADRMask) == 0x10000000;
+}
+
 // Returns the amount the address operand of LD/ST (imm12)
 // should be shifted right by.
 //
@@ -490,6 +509,20 @@ inline Error applyFixup(LinkGraph &G, Block &B, const Edge &E) {
     *(ulittle32_t *)FixupPtr = FixedInstr;
     break;
   }
+  case ADRLiteral21: {
+    assert((FixupAddress.getValue() & 0x3) == 0 && "ADR is not 32-bit aligned");
+    uint32_t RawInstr = *(ulittle32_t *)FixupPtr;
+    assert(isADR(RawInstr) && "RawInstr is not an ADR");
+    int64_t Delta = E.getTarget().getAddress() + E.getAddend() - FixupAddress;
+    if (!isInt<21>(Delta))
+      return makeTargetOutOfRangeError(G, B, E);
+    auto UDelta = static_cast<uint32_t>(Delta);
+    uint32_t EncodedImmHi = ((UDelta >> 2) & 0x7ffff) << 5;
+    uint32_t EncodedImmLo = (UDelta & 0x3) << 29;
+    uint32_t FixedInstr = RawInstr | EncodedImmHi | EncodedImmLo;
+    *(ulittle32_t *)FixupPtr = FixedInstr;
+    break;
+  }
   case TestAndBranch14PCRel: {
     assert((FixupAddress.getValue() & 0x3) == 0 &&
            "Test and branch is not 32-bit aligned");
@@ -585,7 +618,7 @@ extern const char NullPointerContent[PointerSize];
 extern const char PointerJumpStubContent[12];
 
 /// Creates a new pointer block in the given section and returns an
-/// Anonymous symobl pointing to it.
+/// Anonymous symbol pointing to it.
 ///
 /// If InitialTarget is given then an Pointer64 relocation will be added to the
 /// block pointing at InitialTarget.
@@ -613,7 +646,7 @@ inline Symbol &createAnonymousPointer(LinkGraph &G, Section &PointerSection,
 inline Block &createPointerJumpStubBlock(LinkGraph &G, Section &StubSection,
                                          Symbol &PointerSymbol) {
   auto &B = G.createContentBlock(StubSection, PointerJumpStubContent,
-                                 orc::ExecutorAddr(~uint64_t(11)), 1, 0);
+                                 orc::ExecutorAddr(~uint64_t(11)), 4, 0);
   B.addEdge(Page21, 0, PointerSymbol, 0);
   B.addEdge(PageOffset12, 4, PointerSymbol, 0);
   return B;

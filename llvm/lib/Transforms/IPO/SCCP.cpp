@@ -20,7 +20,9 @@
 #include "llvm/Analysis/ValueLattice.h"
 #include "llvm/Analysis/ValueLatticeUtils.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/AttributeMask.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ModRef.h"
@@ -42,7 +44,7 @@ STATISTIC(NumInstReplaced,
           "Number of instructions replaced with (simpler) instruction");
 
 static cl::opt<unsigned> FuncSpecMaxIters(
-    "funcspec-max-iters", cl::init(1), cl::Hidden, cl::desc(
+    "funcspec-max-iters", cl::init(10), cl::Hidden, cl::desc(
     "The maximum number of iterations function specialization is run"));
 
 static void findReturnsToZap(Function &F,
@@ -107,11 +109,11 @@ static void findReturnsToZap(Function &F,
 
 static bool runIPSCCP(
     Module &M, const DataLayout &DL, FunctionAnalysisManager *FAM,
-    std::function<BlockFrequencyInfo &(Function &)> GetBFI,
     std::function<const TargetLibraryInfo &(Function &)> GetTLI,
     std::function<TargetTransformInfo &(Function &)> GetTTI,
     std::function<AssumptionCache &(Function &)> GetAC,
-    function_ref<AnalysisResultsForFn(Function &)> getAnalysis,
+    std::function<DominatorTree &(Function &)> GetDT,
+    std::function<BlockFrequencyInfo &(Function &)> GetBFI,
     bool IsFuncSpecEnabled) {
   SCCPSolver Solver(DL, GetTLI, M.getContext());
   FunctionSpecializer Specializer(Solver, M, FAM, GetBFI, GetTLI, GetTTI,
@@ -123,7 +125,9 @@ static bool runIPSCCP(
     if (F.isDeclaration())
       continue;
 
-    Solver.addAnalysis(F, getAnalysis(F));
+    DominatorTree &DT = GetDT(F);
+    AssumptionCache &AC = GetAC(F);
+    Solver.addPredicateInfo(F, DT, AC);
 
     // Determine if we can track the function's return values. If so, add the
     // function to the solver's set of return-tracked functions.
@@ -140,9 +144,8 @@ static bool runIPSCCP(
     // Assume the function is called.
     Solver.markBlockExecutable(&F.front());
 
-    // Assume nothing about the incoming arguments.
     for (Argument &AI : F.args())
-      Solver.markOverdefined(&AI);
+      Solver.trackValueOfArgument(&AI);
   }
 
   // Determine if we can track any of the module's global variables. If so, add
@@ -188,8 +191,8 @@ static bool runIPSCCP(
           if (ME == MemoryEffects::unknown())
             return AL;
 
-          ME |= MemoryEffects(MemoryEffects::Other,
-                              ME.getModRef(MemoryEffects::ArgMem));
+          ME |= MemoryEffects(IRMemLocation::Other,
+                              ME.getModRef(IRMemLocation::ArgMem));
           return AL.addFnAttribute(
               F.getContext(),
               Attribute::getWithMemoryEffects(F.getContext(), ME));
@@ -224,20 +227,19 @@ static bool runIPSCCP(
           BB, InsertedValues, NumInstRemoved, NumInstReplaced);
     }
 
-    DomTreeUpdater DTU = IsFuncSpecEnabled && Specializer.isClonedFunction(&F)
-        ? DomTreeUpdater(DomTreeUpdater::UpdateStrategy::Lazy)
-        : Solver.getDTU(F);
-
+    DominatorTree *DT = FAM->getCachedResult<DominatorTreeAnalysis>(F);
+    PostDominatorTree *PDT = FAM->getCachedResult<PostDominatorTreeAnalysis>(F);
+    DomTreeUpdater DTU(DT, PDT, DomTreeUpdater::UpdateStrategy::Lazy);
     // Change dead blocks to unreachable. We do it after replacing constants
     // in all executable blocks, because changeToUnreachable may remove PHI
     // nodes in executable blocks we found values for. The function's entry
     // block is not part of BlocksToErase, so we have to handle it separately.
     for (BasicBlock *BB : BlocksToErase) {
-      NumInstRemoved += changeToUnreachable(BB->getFirstNonPHI(),
+      NumInstRemoved += changeToUnreachable(BB->getFirstNonPHIOrDbg(),
                                             /*PreserveLCSSA=*/false, &DTU);
     }
     if (!Solver.isBlockExecutable(&F.front()))
-      NumInstRemoved += changeToUnreachable(F.front().getFirstNonPHI(),
+      NumInstRemoved += changeToUnreachable(F.front().getFirstNonPHIOrDbg(),
                                             /*PreserveLCSSA=*/false, &DTU);
 
     BasicBlock *NewUnreachableBB = nullptr;
@@ -369,6 +371,18 @@ static bool runIPSCCP(
       StoreInst *SI = cast<StoreInst>(GV->user_back());
       SI->eraseFromParent();
     }
+
+    // Try to create a debug constant expression for the global variable
+    // initializer value.
+    SmallVector<DIGlobalVariableExpression *, 1> GVEs;
+    GV->getDebugInfo(GVEs);
+    if (GVEs.size() == 1) {
+      DIBuilder DIB(M);
+      if (DIExpression *InitExpr = getExpressionForConstant(
+              DIB, *GV->getInitializer(), *GV->getValueType()))
+        GVEs[0]->replaceOperandWith(1, InitExpr);
+    }
+
     MadeChanges = true;
     M.eraseGlobalVariable(GV);
     ++NumGlobalConst;
@@ -383,23 +397,21 @@ PreservedAnalyses IPSCCPPass::run(Module &M, ModuleAnalysisManager &AM) {
   auto GetTLI = [&FAM](Function &F) -> const TargetLibraryInfo & {
     return FAM.getResult<TargetLibraryAnalysis>(F);
   };
-  auto GetBFI = [&](Function &F) -> BlockFrequencyInfo & {
-    return FAM.getResult<BlockFrequencyAnalysis>(F);
-  };
   auto GetTTI = [&FAM](Function &F) -> TargetTransformInfo & {
     return FAM.getResult<TargetIRAnalysis>(F);
   };
   auto GetAC = [&FAM](Function &F) -> AssumptionCache & {
     return FAM.getResult<AssumptionAnalysis>(F);
   };
-  auto getAnalysis = [&FAM](Function &F) -> AnalysisResultsForFn {
-    DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
-    return {
-        std::make_unique<PredicateInfo>(F, DT, FAM.getResult<AssumptionAnalysis>(F)),
-        &DT, FAM.getCachedResult<PostDominatorTreeAnalysis>(F) };
+  auto GetDT = [&FAM](Function &F) -> DominatorTree & {
+    return FAM.getResult<DominatorTreeAnalysis>(F);
+  };
+  auto GetBFI = [&FAM](Function &F) -> BlockFrequencyInfo & {
+    return FAM.getResult<BlockFrequencyAnalysis>(F);
   };
 
-  if (!runIPSCCP(M, DL, &FAM, GetBFI, GetTLI, GetTTI, GetAC, getAnalysis,
+
+  if (!runIPSCCP(M, DL, &FAM, GetTLI, GetTTI, GetAC, GetDT, GetBFI,
                  isFuncSpecEnabled()))
     return PreservedAnalyses::all();
 

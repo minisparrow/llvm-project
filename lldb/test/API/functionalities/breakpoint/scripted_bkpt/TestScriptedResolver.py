@@ -12,17 +12,20 @@ from lldbsuite.test.lldbtest import *
 class TestScriptedResolver(TestBase):
     NO_DEBUG_INFO_TESTCASE = True
 
+    @expectedFailureAll(oslist=["windows"], bugnumber="llvm.org/pr24528")
     def test_scripted_resolver(self):
         """Use a scripted resolver to set a by symbol name breakpoint"""
         self.build()
         self.do_test()
 
+    @expectedFailureAll(oslist=["windows"], bugnumber="llvm.org/pr24528")
     def test_search_depths(self):
         """Make sure we are called at the right depths depending on what we return
         from __get_depth__"""
         self.build()
         self.do_test_depths()
 
+    @expectedFailureAll(oslist=["windows"], bugnumber="llvm.org/pr24528")
     def test_command_line(self):
         """Test setting a resolver breakpoint from the command line"""
         self.build()
@@ -120,8 +123,8 @@ class TestScriptedResolver(TestBase):
 
         # Make sure these all got locations:
         for i in range(0, len(right)):
-            self.assertTrue(
-                right[i].GetNumLocations() >= 1, "Breakpoint %d has no locations." % (i)
+            self.assertGreaterEqual(
+                right[i].GetNumLocations(), 1, "Breakpoint %d has no locations." % (i)
             )
 
         # Now some ones that won't take:
@@ -226,7 +229,7 @@ class TestScriptedResolver(TestBase):
         bkpt = target.BreakpointCreateFromScript(
             "resolver.Resolver", extra_args, module_list, file_list
         )
-        self.assertTrue(bkpt.GetNumLocations() > 0, "Resolver got no locations.")
+        self.assertGreater(bkpt.GetNumLocations(), 0, "Resolver got no locations.")
         self.expect(
             "script print(resolver.Resolver.got_files)",
             substrs=["2"],
@@ -237,8 +240,8 @@ class TestScriptedResolver(TestBase):
         bkpt = target.BreakpointCreateFromScript(
             "resolver.ResolverModuleDepth", extra_args, module_list, file_list
         )
-        self.assertTrue(
-            bkpt.GetNumLocations() > 0, "ResolverModuleDepth got no locations."
+        self.assertGreater(
+            bkpt.GetNumLocations(), 0, "ResolverModuleDepth got no locations."
         )
         self.expect(
             "script print(resolver.Resolver.got_files)",
@@ -250,7 +253,9 @@ class TestScriptedResolver(TestBase):
         bkpt = target.BreakpointCreateFromScript(
             "resolver.ResolverCUDepth", extra_args, module_list, file_list
         )
-        self.assertTrue(bkpt.GetNumLocations() > 0, "ResolverCUDepth got no locations.")
+        self.assertGreater(
+            bkpt.GetNumLocations(), 0, "ResolverCUDepth got no locations."
+        )
         self.expect(
             "script print(resolver.Resolver.got_files)",
             substrs=["1"],
@@ -261,8 +266,8 @@ class TestScriptedResolver(TestBase):
         bkpt = target.BreakpointCreateFromScript(
             "resolver.ResolverBadDepth", extra_args, module_list, file_list
         )
-        self.assertTrue(
-            bkpt.GetNumLocations() > 0, "ResolverBadDepth got no locations."
+        self.assertGreater(
+            bkpt.GetNumLocations(), 0, "ResolverBadDepth got no locations."
         )
         self.expect(
             "script print(resolver.Resolver.got_files)",
@@ -274,8 +279,8 @@ class TestScriptedResolver(TestBase):
         bkpt = target.BreakpointCreateFromScript(
             "resolver.ResolverFuncDepth", extra_args, module_list, file_list
         )
-        self.assertTrue(
-            bkpt.GetNumLocations() > 0, "ResolverFuncDepth got no locations."
+        self.assertGreater(
+            bkpt.GetNumLocations(), 0, "ResolverFuncDepth got no locations."
         )
         self.expect(
             "script print(resolver.Resolver.got_files)",

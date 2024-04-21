@@ -14,6 +14,7 @@
 #include "flang/Optimizer/Builder/Character.h"
 #include "flang/Optimizer/Builder/FIRBuilder.h"
 #include "flang/Optimizer/Builder/MutableBox.h"
+#include "flang/Optimizer/Builder/Runtime/Allocatable.h"
 #include "flang/Optimizer/Builder/Todo.h"
 #include "flang/Optimizer/HLFIR/HLFIROps.h"
 #include "mlir/IR/IRMapping.h"
@@ -197,7 +198,8 @@ mlir::Value hlfir::Entity::getFirBase() const {
 fir::FortranVariableOpInterface
 hlfir::genDeclare(mlir::Location loc, fir::FirOpBuilder &builder,
                   const fir::ExtendedValue &exv, llvm::StringRef name,
-                  fir::FortranVariableFlagsAttr flags) {
+                  fir::FortranVariableFlagsAttr flags,
+                  fir::CUDADataAttributeAttr cudaAttr) {
 
   mlir::Value base = fir::getBase(exv);
   assert(fir::conformsWithPassByRef(base.getType()) &&
@@ -227,15 +229,15 @@ hlfir::genDeclare(mlir::Location loc, fir::FirOpBuilder &builder,
       },
       [](const auto &) {});
   auto declareOp = builder.create<hlfir::DeclareOp>(
-      loc, base, name, shapeOrShift, lenParams, flags);
+      loc, base, name, shapeOrShift, lenParams, flags, cudaAttr);
   return mlir::cast<fir::FortranVariableOpInterface>(declareOp.getOperation());
 }
 
-hlfir::AssociateOp hlfir::genAssociateExpr(mlir::Location loc,
-                                           fir::FirOpBuilder &builder,
-                                           hlfir::Entity value,
-                                           mlir::Type variableType,
-                                           llvm::StringRef name) {
+hlfir::AssociateOp
+hlfir::genAssociateExpr(mlir::Location loc, fir::FirOpBuilder &builder,
+                        hlfir::Entity value, mlir::Type variableType,
+                        llvm::StringRef name,
+                        std::optional<mlir::NamedAttribute> attr) {
   assert(value.isValue() && "must not be a variable");
   mlir::Value shape{};
   if (value.isArray())
@@ -258,6 +260,12 @@ hlfir::AssociateOp hlfir::genAssociateExpr(mlir::Location loc,
   }
   llvm::SmallVector<mlir::Value> lenParams;
   genLengthParameters(loc, builder, value, lenParams);
+  if (attr) {
+    assert(name.empty() && "It attribute is provided, no-name is expected");
+    return builder.create<hlfir::AssociateOp>(loc, source, shape, lenParams,
+                                              fir::FortranVariableFlagsAttr{},
+                                              llvm::ArrayRef{*attr});
+  }
   return builder.create<hlfir::AssociateOp>(loc, source, name, shape, lenParams,
                                             fir::FortranVariableFlagsAttr{});
 }
@@ -612,8 +620,13 @@ void hlfir::genLengthParameters(mlir::Location loc, fir::FirOpBuilder &builder,
       return;
     } else if (auto apply = expr.getDefiningOp<hlfir::ApplyOp>()) {
       result.append(apply.getTypeparams().begin(), apply.getTypeparams().end());
+      return;
     }
-    TODO(loc, "inquire type parameters of hlfir.expr");
+    if (entity.isCharacter()) {
+      result.push_back(builder.create<hlfir::GetLengthOp>(loc, expr));
+      return;
+    }
+    TODO(loc, "inquire PDTs length parameters of hlfir.expr");
   }
 
   if (entity.isCharacter()) {
@@ -690,6 +703,8 @@ hlfir::Entity hlfir::derefPointersAndAllocatables(mlir::Location loc,
     // or fir.class to hold bounds, dynamic type or length parameter
     // information. Keep them boxed.
     return boxLoad;
+  } else if (entity.isProcedurePointer()) {
+    return hlfir::Entity{builder.create<fir::LoadOp>(loc, entity)};
   }
   return entity;
 }
@@ -710,6 +725,16 @@ mlir::Type hlfir::getVariableElementType(hlfir::Entity variable) {
   return fir::ReferenceType::get(eleTy);
 }
 
+mlir::Type hlfir::getEntityElementType(hlfir::Entity entity) {
+  if (entity.isVariable())
+    return getVariableElementType(entity);
+  if (entity.isScalar())
+    return entity.getType();
+  auto exprType = mlir::dyn_cast<hlfir::ExprType>(entity.getType());
+  assert(exprType && "array value must be an hlfir.expr");
+  return exprType.getElementExprType();
+}
+
 static hlfir::ExprType getArrayExprType(mlir::Type elementType,
                                         mlir::Value shape, bool isPolymorphic) {
   unsigned rank = shape.getType().cast<fir::ShapeType>().getRank();
@@ -722,14 +747,15 @@ static hlfir::ExprType getArrayExprType(mlir::Type elementType,
                               isPolymorphic);
 }
 
-hlfir::ElementalOp
-hlfir::genElementalOp(mlir::Location loc, fir::FirOpBuilder &builder,
-                      mlir::Type elementType, mlir::Value shape,
-                      mlir::ValueRange typeParams,
-                      const ElementalKernelGenerator &genKernel) {
-  mlir::Type exprType = getArrayExprType(elementType, shape, false);
-  auto elementalOp =
-      builder.create<hlfir::ElementalOp>(loc, exprType, shape, typeParams);
+hlfir::ElementalOp hlfir::genElementalOp(
+    mlir::Location loc, fir::FirOpBuilder &builder, mlir::Type elementType,
+    mlir::Value shape, mlir::ValueRange typeParams,
+    const ElementalKernelGenerator &genKernel, bool isUnordered,
+    mlir::Value polymorphicMold, mlir::Type exprType) {
+  if (!exprType)
+    exprType = getArrayExprType(elementType, shape, !!polymorphicMold);
+  auto elementalOp = builder.create<hlfir::ElementalOp>(
+      loc, exprType, shape, polymorphicMold, typeParams, isUnordered);
   auto insertPt = builder.saveInsertionPoint();
   builder.setInsertionPointToStart(elementalOp.getBody());
   mlir::Value elementResult = genKernel(loc, builder, elementalOp.getIndices());
@@ -766,41 +792,38 @@ hlfir::inlineElementalOp(mlir::Location loc, fir::FirOpBuilder &builder,
 
 mlir::Value hlfir::inlineElementalOp(
     mlir::Location loc, fir::FirOpBuilder &builder,
-    hlfir::ElementalOp elemental, mlir::ValueRange oneBasedIndices,
+    hlfir::ElementalOpInterface elemental, mlir::ValueRange oneBasedIndices,
     mlir::IRMapping &mapper,
     const std::function<bool(hlfir::ElementalOp)> &mustRecursivelyInline) {
-  mlir::Region &region = elemental.getRegion();
+  mlir::Region &region = elemental.getElementalRegion();
   // hlfir.elemental region is a SizedRegion<1>.
   assert(region.hasOneBlock() && "elemental region must have one block");
   mapper.map(elemental.getIndices(), oneBasedIndices);
-  mlir::Block::OpListType &ops = region.back().getOperations();
-  assert(!ops.empty() && "elemental block cannot be empty");
-  auto end = ops.end();
-  for (auto opIt = ops.begin(); std::next(opIt) != end; ++opIt) {
-    if (auto apply = mlir::dyn_cast<hlfir::ApplyOp>(*opIt))
+  for (auto &op : region.front().without_terminator()) {
+    if (auto apply = mlir::dyn_cast<hlfir::ApplyOp>(op))
       if (auto appliedElemental =
               apply.getExpr().getDefiningOp<hlfir::ElementalOp>())
         if (mustRecursivelyInline(appliedElemental)) {
           llvm::SmallVector<mlir::Value> clonedApplyIndices;
           for (auto indice : apply.getIndices())
             clonedApplyIndices.push_back(mapper.lookupOrDefault(indice));
-          mlir::Value inlined = inlineElementalOp(
-              loc, builder, appliedElemental, clonedApplyIndices, mapper,
-              mustRecursivelyInline);
+          hlfir::ElementalOpInterface elementalIface =
+              mlir::cast<hlfir::ElementalOpInterface>(
+                  appliedElemental.getOperation());
+          mlir::Value inlined = inlineElementalOp(loc, builder, elementalIface,
+                                                  clonedApplyIndices, mapper,
+                                                  mustRecursivelyInline);
           mapper.map(apply.getResult(), inlined);
           continue;
         }
-    (void)builder.clone(*opIt, mapper);
+    (void)builder.clone(op, mapper);
   }
-  auto oldYield = mlir::dyn_cast_or_null<hlfir::YieldElementOp>(
-      region.back().getOperations().back());
-  assert(oldYield && "must terminate with yieldElementalOp");
-  return mapper.lookupOrDefault(oldYield.getElementValue());
+  return mapper.lookupOrDefault(elemental.getElementEntity());
 }
 
 hlfir::LoopNest hlfir::genLoopNest(mlir::Location loc,
                                    fir::FirOpBuilder &builder,
-                                   mlir::ValueRange extents) {
+                                   mlir::ValueRange extents, bool isUnordered) {
   hlfir::LoopNest loopNest;
   assert(!extents.empty() && "must have at least one extent");
   auto insPt = builder.saveInsertionPoint();
@@ -811,7 +834,8 @@ hlfir::LoopNest hlfir::genLoopNest(mlir::Location loc,
   unsigned dim = extents.size() - 1;
   for (auto extent : llvm::reverse(extents)) {
     auto ub = builder.createConvert(loc, indexType, extent);
-    loopNest.innerLoop = builder.create<fir::DoLoopOp>(loc, one, ub, one);
+    loopNest.innerLoop =
+        builder.create<fir::DoLoopOp>(loc, one, ub, one, isUnordered);
     builder.setInsertionPointToStart(loopNest.innerLoop.getBody());
     // Reverse the indices so they are in column-major order.
     loopNest.oneBasedIndices[dim--] = loopNest.innerLoop.getInductionVar();
@@ -824,42 +848,44 @@ hlfir::LoopNest hlfir::genLoopNest(mlir::Location loc,
 
 static fir::ExtendedValue
 translateVariableToExtendedValue(mlir::Location loc, fir::FirOpBuilder &builder,
-                                 hlfir::Entity variable) {
+                                 hlfir::Entity variable,
+                                 bool forceHlfirBase = false) {
   assert(variable.isVariable() && "must be a variable");
   /// When going towards FIR, use the original base value to avoid
   /// introducing descriptors at runtime when they are not required.
-  mlir::Value firBase = variable.getFirBase();
+  mlir::Value base =
+      forceHlfirBase ? variable.getBase() : variable.getFirBase();
   if (variable.isMutableBox())
-    return fir::MutableBoxValue(firBase, getExplicitTypeParams(variable),
+    return fir::MutableBoxValue(base, getExplicitTypeParams(variable),
                                 fir::MutableProperties{});
 
-  if (firBase.getType().isa<fir::BaseBoxType>()) {
+  if (base.getType().isa<fir::BaseBoxType>()) {
     if (!variable.isSimplyContiguous() || variable.isPolymorphic() ||
         variable.isDerivedWithLengthParameters() || variable.isOptional()) {
       llvm::SmallVector<mlir::Value> nonDefaultLbounds =
           getNonDefaultLowerBounds(loc, builder, variable);
-      return fir::BoxValue(firBase, nonDefaultLbounds,
+      return fir::BoxValue(base, nonDefaultLbounds,
                            getExplicitTypeParams(variable));
     }
     // Otherwise, the variable can be represented in a fir::ExtendedValue
     // without the overhead of a fir.box.
-    firBase = genVariableRawAddress(loc, builder, variable);
+    base = genVariableRawAddress(loc, builder, variable);
   }
 
   if (variable.isScalar()) {
     if (variable.isCharacter()) {
-      if (firBase.getType().isa<fir::BoxCharType>())
-        return genUnboxChar(loc, builder, firBase);
+      if (base.getType().isa<fir::BoxCharType>())
+        return genUnboxChar(loc, builder, base);
       mlir::Value len = genCharacterVariableLength(loc, builder, variable);
-      return fir::CharBoxValue{firBase, len};
+      return fir::CharBoxValue{base, len};
     }
-    return firBase;
+    return base;
   }
   llvm::SmallVector<mlir::Value> extents;
   llvm::SmallVector<mlir::Value> nonDefaultLbounds;
   if (variable.getType().isa<fir::BaseBoxType>() &&
       !variable.getIfVariableInterface()) {
-    // This special case avoids generating two generating to sets of identical
+    // This special case avoids generating two sets of identical
     // fir.box_dim to get both the lower bounds and extents.
     genLboundsAndExtentsFromBox(loc, builder, variable, nonDefaultLbounds,
                                 &extents);
@@ -869,15 +895,16 @@ translateVariableToExtendedValue(mlir::Location loc, fir::FirOpBuilder &builder,
   }
   if (variable.isCharacter())
     return fir::CharArrayBoxValue{
-        firBase, genCharacterVariableLength(loc, builder, variable), extents,
+        base, genCharacterVariableLength(loc, builder, variable), extents,
         nonDefaultLbounds};
-  return fir::ArrayBoxValue{firBase, extents, nonDefaultLbounds};
+  return fir::ArrayBoxValue{base, extents, nonDefaultLbounds};
 }
 
 fir::ExtendedValue
 hlfir::translateToExtendedValue(mlir::Location loc, fir::FirOpBuilder &builder,
-                                fir::FortranVariableOpInterface var) {
-  return translateVariableToExtendedValue(loc, builder, var);
+                                fir::FortranVariableOpInterface var,
+                                bool forceHlfirBase) {
+  return translateVariableToExtendedValue(loc, builder, var, forceHlfirBase);
 }
 
 std::pair<fir::ExtendedValue, std::optional<hlfir::CleanupFunction>>
@@ -897,8 +924,9 @@ hlfir::translateToExtendedValue(mlir::Location loc, fir::FirOpBuilder &builder,
   }
 
   if (entity.getType().isa<hlfir::ExprType>()) {
+    mlir::NamedAttribute byRefAttr = fir::getAdaptToByRefAttr(builder);
     hlfir::AssociateOp associate = hlfir::genAssociateExpr(
-        loc, builder, entity, entity.getType(), "adapt.valuebyref");
+        loc, builder, entity, entity.getType(), "", byRefAttr);
     auto *bldr = &builder;
     hlfir::CleanupFunction cleanup = [bldr, loc, associate]() -> void {
       bldr->create<hlfir::EndAssociateOp>(loc, associate);
@@ -911,27 +939,12 @@ hlfir::translateToExtendedValue(mlir::Location loc, fir::FirOpBuilder &builder,
 
 std::pair<fir::ExtendedValue, std::optional<hlfir::CleanupFunction>>
 hlfir::convertToValue(mlir::Location loc, fir::FirOpBuilder &builder,
-                      const hlfir::Entity &entity) {
-  auto [exv, cleanup] = translateToExtendedValue(loc, builder, entity);
+                      hlfir::Entity entity) {
   // Load scalar references to integer, logical, real, or complex value
   // to an mlir value, dereference allocatable and pointers, and get rid
   // of fir.box that are not needed or create a copy into contiguous memory.
-  exv = exv.match(
-      [&](const fir::UnboxedValue &box) -> fir::ExtendedValue {
-        if (mlir::Type elementType = fir::dyn_cast_ptrEleTy(box.getType()))
-          if (fir::isa_trivial(elementType))
-            return builder.create<fir::LoadOp>(loc, box);
-        return box;
-      },
-      [&](const fir::CharBoxValue &box) -> fir::ExtendedValue { return box; },
-      [&](const fir::ArrayBoxValue &box) -> fir::ExtendedValue { return box; },
-      [&](const fir::CharArrayBoxValue &box) -> fir::ExtendedValue {
-        return box;
-      },
-      [&](const auto &) -> fir::ExtendedValue {
-        TODO(loc, "lower descriptor designator to HLFIR value");
-      });
-  return {exv, cleanup};
+  auto derefedAndLoadedEntity = loadTrivialScalar(loc, builder, entity);
+  return translateToExtendedValue(loc, builder, derefedAndLoadedEntity);
 }
 
 static fir::ExtendedValue placeTrivialInMemory(mlir::Location loc,
@@ -948,7 +961,12 @@ static fir::ExtendedValue placeTrivialInMemory(mlir::Location loc,
 
 std::pair<fir::ExtendedValue, std::optional<hlfir::CleanupFunction>>
 hlfir::convertToBox(mlir::Location loc, fir::FirOpBuilder &builder,
-                    const hlfir::Entity &entity, mlir::Type targetType) {
+                    hlfir::Entity entity, mlir::Type targetType) {
+  // fir::factory::createBoxValue is not meant to deal with procedures.
+  // Dereference procedure pointers here.
+  if (entity.isProcedurePointer())
+    entity = hlfir::derefPointersAndAllocatables(loc, builder, entity);
+
   auto [exv, cleanup] = translateToExtendedValue(loc, builder, entity);
   // Procedure entities should not go through createBoxValue that embox
   // object entities. Return the fir.boxproc directly.
@@ -963,7 +981,7 @@ hlfir::convertToBox(mlir::Location loc, fir::FirOpBuilder &builder,
 
 std::pair<fir::ExtendedValue, std::optional<hlfir::CleanupFunction>>
 hlfir::convertToAddress(mlir::Location loc, fir::FirOpBuilder &builder,
-                        const hlfir::Entity &entity, mlir::Type targetType) {
+                        hlfir::Entity entity, mlir::Type targetType) {
   hlfir::Entity derefedEntity =
       hlfir::derefPointersAndAllocatables(loc, builder, entity);
   auto [exv, cleanup] =
@@ -1018,7 +1036,210 @@ hlfir::cloneToElementalOp(mlir::Location loc, fir::FirOpBuilder &builder,
     return hlfir::loadTrivialScalar(l, b, newAddr);
   };
   mlir::Type elementType = scalarAddress.getFortranElementType();
-  return hlfir::genElementalOp(loc, builder, elementType,
-                               elementalAddrOp.getShape(), typeParams,
-                               genKernel);
+  return hlfir::genElementalOp(
+      loc, builder, elementType, elementalAddrOp.getShape(), typeParams,
+      genKernel, !elementalAddrOp.isOrdered(), elementalAddrOp.getMold());
+}
+
+bool hlfir::elementalOpMustProduceTemp(hlfir::ElementalOp elemental) {
+  for (mlir::Operation *useOp : elemental->getUsers())
+    if (auto destroy = mlir::dyn_cast<hlfir::DestroyOp>(useOp))
+      if (destroy.mustFinalizeExpr())
+        return true;
+
+  return false;
+}
+
+std::pair<hlfir::Entity, mlir::Value>
+hlfir::createTempFromMold(mlir::Location loc, fir::FirOpBuilder &builder,
+                          hlfir::Entity mold) {
+  llvm::SmallVector<mlir::Value> lenParams;
+  hlfir::genLengthParameters(loc, builder, mold, lenParams);
+  llvm::StringRef tmpName{".tmp"};
+  mlir::Value alloc;
+  mlir::Value isHeapAlloc;
+  mlir::Value shape{};
+  fir::FortranVariableFlagsAttr declAttrs;
+
+  if (mold.isPolymorphic()) {
+    // Create unallocated polymorphic temporary using the dynamic type
+    // of the mold. The static type of the temporary matches
+    // the static type of the mold, but then the dynamic type
+    // of the mold is applied to the temporary's descriptor.
+
+    if (mold.isArray())
+      hlfir::genShape(loc, builder, mold);
+
+    // Create polymorphic allocatable box on the stack.
+    mlir::Type boxHeapType = fir::HeapType::get(fir::unwrapRefType(
+        mlir::cast<fir::BaseBoxType>(mold.getType()).getEleTy()));
+    // The box must be initialized, because AllocatableApplyMold
+    // may read its contents (e.g. for checking whether it is allocated).
+    alloc = fir::factory::genNullBoxStorage(builder, loc,
+                                            fir::ClassType::get(boxHeapType));
+    // The temporary is unallocated even after AllocatableApplyMold below.
+    // If the temporary is used as assignment LHS it will be automatically
+    // allocated on the heap, as long as we use Assign family
+    // runtime functions. So set MustFree to true.
+    isHeapAlloc = builder.createBool(loc, true);
+    declAttrs = fir::FortranVariableFlagsAttr::get(
+        builder.getContext(), fir::FortranVariableFlagsEnum::allocatable);
+  } else if (mold.isArray()) {
+    mlir::Type sequenceType =
+        hlfir::getFortranElementOrSequenceType(mold.getType());
+    shape = hlfir::genShape(loc, builder, mold);
+    auto extents = hlfir::getIndexExtents(loc, builder, shape);
+    alloc = builder.createHeapTemporary(loc, sequenceType, tmpName, extents,
+                                        lenParams);
+    isHeapAlloc = builder.createBool(loc, true);
+  } else {
+    alloc = builder.createTemporary(loc, mold.getFortranElementType(), tmpName,
+                                    /*shape=*/std::nullopt, lenParams);
+    isHeapAlloc = builder.createBool(loc, false);
+  }
+  auto declareOp = builder.create<hlfir::DeclareOp>(loc, alloc, tmpName, shape,
+                                                    lenParams, declAttrs);
+  if (mold.isPolymorphic()) {
+    int rank = mold.getRank();
+    // TODO: should probably read rank from the mold.
+    if (rank < 0)
+      TODO(loc, "create temporary for assumed rank polymorphic");
+    fir::runtime::genAllocatableApplyMold(builder, loc, alloc,
+                                          mold.getFirBase(), rank);
+  }
+
+  return {hlfir::Entity{declareOp.getBase()}, isHeapAlloc};
+}
+
+hlfir::Entity hlfir::createStackTempFromMold(mlir::Location loc,
+                                             fir::FirOpBuilder &builder,
+                                             hlfir::Entity mold) {
+  llvm::SmallVector<mlir::Value> lenParams;
+  hlfir::genLengthParameters(loc, builder, mold, lenParams);
+  llvm::StringRef tmpName{".tmp"};
+  mlir::Value alloc;
+  mlir::Value shape{};
+  fir::FortranVariableFlagsAttr declAttrs;
+
+  if (mold.isPolymorphic()) {
+    // genAllocatableApplyMold does heap allocation
+    TODO(loc, "createStackTempFromMold for polymorphic type");
+  } else if (mold.isArray()) {
+    mlir::Type sequenceType =
+        hlfir::getFortranElementOrSequenceType(mold.getType());
+    shape = hlfir::genShape(loc, builder, mold);
+    auto extents = hlfir::getIndexExtents(loc, builder, shape);
+    alloc =
+        builder.createTemporary(loc, sequenceType, tmpName, extents, lenParams);
+  } else {
+    alloc = builder.createTemporary(loc, mold.getFortranElementType(), tmpName,
+                                    /*shape=*/std::nullopt, lenParams);
+  }
+  auto declareOp = builder.create<hlfir::DeclareOp>(loc, alloc, tmpName, shape,
+                                                    lenParams, declAttrs);
+  return hlfir::Entity{declareOp.getBase()};
+}
+
+hlfir::EntityWithAttributes
+hlfir::convertCharacterKind(mlir::Location loc, fir::FirOpBuilder &builder,
+                            hlfir::Entity scalarChar, int toKind) {
+  auto src = hlfir::convertToAddress(loc, builder, scalarChar,
+                                     scalarChar.getFortranElementType());
+  assert(src.first.getCharBox() && "must be scalar character");
+  fir::CharBoxValue res = fir::factory::convertCharacterKind(
+      builder, loc, *src.first.getCharBox(), toKind);
+  if (src.second.has_value())
+    src.second.value()();
+
+  return hlfir::EntityWithAttributes{builder.create<hlfir::DeclareOp>(
+      loc, res.getAddr(), ".temp.kindconvert", /*shape=*/nullptr,
+      /*typeparams=*/mlir::ValueRange{res.getLen()},
+      fir::FortranVariableFlagsAttr{})};
+}
+
+std::pair<hlfir::Entity, std::optional<hlfir::CleanupFunction>>
+hlfir::genTypeAndKindConvert(mlir::Location loc, fir::FirOpBuilder &builder,
+                             hlfir::Entity source, mlir::Type toType,
+                             bool preserveLowerBounds) {
+  mlir::Type fromType = source.getFortranElementType();
+  toType = hlfir::getFortranElementType(toType);
+  if (!toType || fromType == toType ||
+      !(fir::isa_trivial(toType) || mlir::isa<fir::CharacterType>(toType)))
+    return {source, std::nullopt};
+
+  std::optional<int> toKindCharConvert;
+  if (auto toCharTy = mlir::dyn_cast<fir::CharacterType>(toType)) {
+    if (auto fromCharTy = mlir::dyn_cast<fir::CharacterType>(fromType))
+      if (toCharTy.getFKind() != fromCharTy.getFKind()) {
+        toKindCharConvert = toCharTy.getFKind();
+        // Preserve source length (padding/truncation will occur in assignment
+        // if needed).
+        toType = fir::CharacterType::get(
+            fromType.getContext(), toCharTy.getFKind(), fromCharTy.getLen());
+      }
+    // Do not convert in case of character length mismatch only, hlfir.assign
+    // deals with it.
+    if (!toKindCharConvert)
+      return {source, std::nullopt};
+  }
+
+  if (source.getRank() == 0) {
+    mlir::Value cast = toKindCharConvert
+                           ? mlir::Value{hlfir::convertCharacterKind(
+                                 loc, builder, source, *toKindCharConvert)}
+                           : builder.convertWithSemantics(loc, toType, source);
+    return {hlfir::Entity{cast}, std::nullopt};
+  }
+
+  mlir::Value shape = hlfir::genShape(loc, builder, source);
+  auto genKernel = [source, toType, toKindCharConvert](
+                       mlir::Location loc, fir::FirOpBuilder &builder,
+                       mlir::ValueRange oneBasedIndices) -> hlfir::Entity {
+    auto elementPtr =
+        hlfir::getElementAt(loc, builder, source, oneBasedIndices);
+    auto val = hlfir::loadTrivialScalar(loc, builder, elementPtr);
+    if (toKindCharConvert)
+      return hlfir::convertCharacterKind(loc, builder, val, *toKindCharConvert);
+    return hlfir::EntityWithAttributes{
+        builder.convertWithSemantics(loc, toType, val)};
+  };
+  llvm::SmallVector<mlir::Value, 1> lenParams;
+  hlfir::genLengthParameters(loc, builder, source, lenParams);
+  mlir::Value convertedRhs =
+      hlfir::genElementalOp(loc, builder, toType, shape, lenParams, genKernel,
+                            /*isUnordered=*/true);
+
+  if (preserveLowerBounds && source.hasNonDefaultLowerBounds()) {
+    hlfir::AssociateOp associate =
+        genAssociateExpr(loc, builder, hlfir::Entity{convertedRhs},
+                         convertedRhs.getType(), ".tmp.keeplbounds");
+    fir::ShapeOp shapeOp = associate.getShape().getDefiningOp<fir::ShapeOp>();
+    assert(shapeOp && "associate shape must be a fir.shape");
+    const unsigned rank = shapeOp.getExtents().size();
+    llvm::SmallVector<mlir::Value> lbAndExtents;
+    for (unsigned dim = 0; dim < rank; ++dim) {
+      lbAndExtents.push_back(hlfir::genLBound(loc, builder, source, dim));
+      lbAndExtents.push_back(shapeOp.getExtents()[dim]);
+    }
+    auto shapeShiftType = fir::ShapeShiftType::get(builder.getContext(), rank);
+    mlir::Value shapeShift =
+        builder.create<fir::ShapeShiftOp>(loc, shapeShiftType, lbAndExtents);
+    auto declareOp = builder.create<hlfir::DeclareOp>(
+        loc, associate.getFirBase(), *associate.getUniqName(), shapeShift,
+        associate.getTypeparams(), /*flags=*/fir::FortranVariableFlagsAttr{});
+    hlfir::Entity castWithLbounds =
+        mlir::cast<fir::FortranVariableOpInterface>(declareOp.getOperation());
+    fir::FirOpBuilder *bldr = &builder;
+    auto cleanup = [loc, bldr, convertedRhs, associate]() {
+      bldr->create<hlfir::EndAssociateOp>(loc, associate);
+      bldr->create<hlfir::DestroyOp>(loc, convertedRhs);
+    };
+    return {castWithLbounds, cleanup};
+  }
+
+  fir::FirOpBuilder *bldr = &builder;
+  auto cleanup = [loc, bldr, convertedRhs]() {
+    bldr->create<hlfir::DestroyOp>(loc, convertedRhs);
+  };
+  return {hlfir::Entity{convertedRhs}, cleanup};
 }

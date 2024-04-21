@@ -1,5 +1,10 @@
 include "llvm/Option/OptParser.td"
 
+multiclass BB<string name, string help1, string help2> {
+  def NAME: Flag<["--"], name>, HelpText<help1>;
+  def no_ # NAME: Flag<["--"], "no-" # name>, HelpText<help2>;
+}
+
 // Flags that lld/MachO understands but ld64 doesn't. These take
 // '--' instead of '-' and use dashes instead of underscores, so
 // they don't collide with the ld64 compat options.
@@ -124,6 +129,21 @@ def strict_auto_link : Flag<["--"], "strict-auto-link">,
 def check_category_conflicts : Flag<["--"], "check-category-conflicts">,
     HelpText<"Check for conflicts between category & class methods">,
     Group<grp_lld>;
+def objc_category_merging : Flag<["-"], "objc_category_merging">,
+    HelpText<"Merge Objective-C categories that share the same base class">,
+    Group<grp_lld>;
+def no_objc_category_merging : Flag<["-"], "no_objc_category_merging">,
+    HelpText<"Do not merge Objective-C categories">,
+    Group<grp_lld>;
+def lto_debug_pass_manager: Flag<["--"], "lto-debug-pass-manager">,
+    HelpText<"Debug new pass manager">, Group<grp_lld>;
+def cs_profile_generate: Flag<["--"], "cs-profile-generate">,
+    HelpText<"Perform context sensitive PGO instrumentation">, Group<grp_lld>;
+def cs_profile_path: Joined<["--"], "cs-profile-path=">,
+    HelpText<"Context sensitive profile file path">, Group<grp_lld>;
+defm pgo_warn_mismatch: BB<"pgo-warn-mismatch",
+  "turn on warnings about profile cfg mismatch (default)",
+  "turn off warnings about profile cfg mismatch">, Group<grp_lld>;
 
 // This is a complete Options.td compiled from Apple's ld(1) manpage
 // dated 2018-03-07 and cross checked with ld64 source code in repo
@@ -363,7 +383,7 @@ def grp_version : OptionGroup<"version">, HelpText<"VERSION TARGETING">;
 
 def platform_version : MultiArg<["-"], "platform_version", 3>,
     MetaVarName<"<platform> <min_version> <sdk_version>">,
-    HelpText<"Platform (e.g., macos, ios, tvos, watchos, bridgeos, mac-catalyst, ios-sim, tvos-sim, watchos-sim, driverkit) and version numbers">,
+    HelpText<"Platform (e.g., macos, ios, tvos, watchos, xros, bridgeos, mac-catalyst, ios-sim, tvos-sim, watchos-sim, xros-sim, driverkit) and version numbers">,
     Group<grp_version>;
 def sdk_version : Separate<["-"], "sdk_version">,
     HelpText<"This option is undocumented in ld64">,
@@ -644,21 +664,6 @@ def add_ast_path : Separate<["-"], "add_ast_path">,
     HelpText<"AST paths will be emitted as STABS">,
     Group<grp_symtab>;
 
-def grp_bitcode : OptionGroup<"bitcode">, HelpText<"BITCODE BUILD FLOW">;
-
-def bitcode_bundle : Flag<["-"], "bitcode_bundle">,
-    HelpText<"Generate an embedded bitcode bundle in the __LLVM,__bundle section of the output">,
-    Group<grp_bitcode>;
-def bitcode_hide_symbols : Flag<["-"], "bitcode_hide_symbols">,
-    HelpText<"With -bitcode_bundle, hide all non-exported symbols from output bitcode bundle.">,
-    Flags<[HelpHidden]>,
-    Group<grp_bitcode>;
-def bitcode_symbol_map : Separate<["-"], "bitcode_symbol_map">,
-    MetaVarName<"<path>">,
-    HelpText<"Write the bitcode symbol reverse mapping to file <path>, or if a directory, to <path>/UUID.bcsymbolmap">,
-    Flags<[HelpHidden]>,
-    Group<grp_bitcode>;
-
 def grp_rare : OptionGroup<"rare">, HelpText<"RARELY USED">;
 
 def v : Flag<["-"], "v">,
@@ -800,7 +805,6 @@ def allow_sub_type_mismatches : Flag<["-"], "allow_sub_type_mismatches">,
     Group<grp_rare>;
 def no_uuid : Flag<["-"], "no_uuid">,
     HelpText<"Do not generate the LC_UUID load command">,
-    Flags<[HelpHidden]>,
     Group<grp_rare>;
 def root_safe : Flag<["-"], "root_safe">,
     HelpText<"Set the MH_ROOT_SAFE bit in the mach-o header">,
@@ -967,10 +971,6 @@ def interposable_list : Separate<["-"], "interposable_list">,
     Group<grp_rare>;
 def no_function_starts : Flag<["-"], "no_function_starts">,
     HelpText<"Do not create table of function start addresses">,
-    Group<grp_rare>;
-def no_objc_category_merging : Flag<["-"], "no_objc_category_merging">,
-    HelpText<"Do not merge Objective-C categories into their classes">,
-    Flags<[HelpHidden]>,
     Group<grp_rare>;
 def object_path_lto : Separate<["-"], "object_path_lto">,
     MetaVarName<"<path>">,
@@ -1200,6 +1200,28 @@ def slow_stubs : Flag<["-"], "slow_stubs">,
     Flags<[HelpHidden]>,
     Group<grp_obsolete>;
 
+def bitcode_bundle : Flag<["-"], "bitcode_bundle">,
+    HelpText<"Obsolete since the App Store no longer supports binaries with embedded bitcode">,
+    Flags<[HelpHidden]>,
+    Group<grp_obsolete>;
+def bitcode_hide_symbols : Flag<["-"], "bitcode_hide_symbols">,
+    HelpText<"Obsolete since the App Store no longer supports binaries with embedded bitcode">,
+    Flags<[HelpHidden]>,
+    Group<grp_obsolete>;
+def bitcode_symbol_map : Separate<["-"], "bitcode_symbol_map">,
+    MetaVarName<"<path>">,
+    HelpText<"Obsolete since the App Store no longer supports binaries with embedded bitcode">,
+    Flags<[HelpHidden]>,
+    Group<grp_obsolete>;
+def bitcode_process_mode : Separate<["-"], "bitcode_process_mode">,
+    HelpText<"Obsolete since the App Store no longer supports binaries with embedded bitcode">,
+    Flags<[HelpHidden]>,
+    Group<grp_obsolete>;
+def bitcode_verify : Flag<["-"], "bitcode_verify">,
+    HelpText<"Obsolete since the App Store no longer supports binaries with embedded bitcode">,
+    Flags<[HelpHidden]>,
+    Group<grp_obsolete>;
+
 def grp_undocumented : OptionGroup<"undocumented">, HelpText<"UNDOCUMENTED">;
 
 def add_linker_option : Flag<["-"], "add_linker_option">,
@@ -1223,14 +1245,6 @@ def allow_dead_duplicates : Flag<["-"], "allow_dead_duplicates">,
     Flags<[HelpHidden]>,
     Group<grp_undocumented>;
 def allow_simulator_linking_to_macosx_dylibs : Flag<["-"], "allow_simulator_linking_to_macosx_dylibs">,
-    HelpText<"This option is undocumented in ld64">,
-    Flags<[HelpHidden]>,
-    Group<grp_undocumented>;
-def bitcode_process_mode : Separate<["-"], "bitcode_process_mode">,
-    HelpText<"This option is undocumented in ld64">,
-    Flags<[HelpHidden]>,
-    Group<grp_undocumented>;
-def bitcode_verify : Flag<["-"], "bitcode_verify">,
     HelpText<"This option is undocumented in ld64">,
     Flags<[HelpHidden]>,
     Group<grp_undocumented>;
@@ -1269,6 +1283,12 @@ def no_fixup_chains : Flag<["-"], "no_fixup_chains">,
 def fixup_chains_section : Flag<["-"], "fixup_chains_section">,
     HelpText<"This option is undocumented in ld64">,
     Flags<[HelpHidden]>,
+    Group<grp_undocumented>;
+def objc_relative_method_lists : Flag<["-"], "objc_relative_method_lists">,
+    HelpText<"Emit relative method lists (more compact representation)">,
+    Group<grp_undocumented>;
+def no_objc_relative_method_lists : Flag<["-"], "no_objc_relative_method_lists">,
+    HelpText<"Don't emit relative method lists (use traditional representation)">,
     Group<grp_undocumented>;
 def flto_codegen_only : Flag<["-"], "flto-codegen-only">,
     HelpText<"This option is undocumented in ld64">,
@@ -1391,5 +1411,11 @@ def objc_abi_version : Separate<["-"], "objc_abi_version">,
     Group<grp_ignored_silently>;
 def debug_variant : Flag<["-"], "debug_variant">,
     HelpText<"Do not warn about issues that are only problems for binaries shipping to customers.">,
+    Flags<[HelpHidden]>,
+    Group<grp_ignored_silently>;
+
+// NOTE: This flag should be respected if -warn_duplicate_libraries is ever implemented.
+def no_warn_duplicate_libraries : Flag<["-"], "no_warn_duplicate_libraries">,
+    HelpText<"Do not warn if the input contains duplicate library options.">,
     Flags<[HelpHidden]>,
     Group<grp_ignored_silently>;

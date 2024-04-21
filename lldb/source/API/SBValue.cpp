@@ -20,11 +20,11 @@
 #include "lldb/Core/Declaration.h"
 #include "lldb/Core/Module.h"
 #include "lldb/Core/Section.h"
-#include "lldb/Core/StreamFile.h"
 #include "lldb/Core/Value.h"
 #include "lldb/Core/ValueObject.h"
 #include "lldb/Core/ValueObjectConstResult.h"
 #include "lldb/DataFormatters/DataVisualization.h"
+#include "lldb/DataFormatters/DumpValueObjectOptions.h"
 #include "lldb/Symbol/Block.h"
 #include "lldb/Symbol/ObjectFile.h"
 #include "lldb/Symbol/Type.h"
@@ -115,7 +115,7 @@ public:
 
     Target *target = value_sp->GetTargetSP().get();
     // If this ValueObject holds an error, then it is valuable for that.
-    if (value_sp->GetError().Fail()) 
+    if (value_sp->GetError().Fail())
       return value_sp;
 
     if (!target)
@@ -668,7 +668,7 @@ SBValue SBValue::GetChildAtIndex(uint32_t idx,
   lldb::ValueObjectSP value_sp(GetSP(locker));
   if (value_sp) {
     const bool can_create = true;
-    child_sp = value_sp->GetChildAtIndex(idx, can_create);
+    child_sp = value_sp->GetChildAtIndex(idx);
     if (can_create_synthetic && !child_sp) {
       child_sp = value_sp->GetSyntheticArrayMember(idx, can_create);
     }
@@ -687,7 +687,7 @@ uint32_t SBValue::GetIndexOfChildWithName(const char *name) {
   ValueLocker locker;
   lldb::ValueObjectSP value_sp(GetSP(locker));
   if (value_sp) {
-    idx = value_sp->GetIndexOfChildWithName(ConstString(name));
+    idx = value_sp->GetIndexOfChildWithName(name);
   }
   return idx;
 }
@@ -711,12 +711,11 @@ SBValue::GetChildMemberWithName(const char *name,
   LLDB_INSTRUMENT_VA(this, name, use_dynamic_value);
 
   lldb::ValueObjectSP child_sp;
-  const ConstString str_name(name);
 
   ValueLocker locker;
   lldb::ValueObjectSP value_sp(GetSP(locker));
   if (value_sp) {
-    child_sp = value_sp->GetChildMemberWithName(str_name, true);
+    child_sp = value_sp->GetChildMemberWithName(name);
   }
 
   SBValue sb_value;
@@ -948,7 +947,7 @@ uint32_t SBValue::GetNumChildren(uint32_t max) {
   ValueLocker locker;
   lldb::ValueObjectSP value_sp(GetSP(locker));
   if (value_sp)
-    num_children = value_sp->GetNumChildren(max);
+    num_children = value_sp->GetNumChildrenIgnoringErrors(max);
 
   return num_children;
 }
@@ -1040,8 +1039,8 @@ lldb::ValueObjectSP SBValue::GetSP(ValueLocker &locker) const {
   // IsValid means that the SBValue has a value in it.  But that's not the
   // only time that ValueObjects are useful.  We also want to return the value
   // if there's an error state in it.
-  if (!m_opaque_sp || (!m_opaque_sp->IsValid() 
-      && (m_opaque_sp->GetRootSP() 
+  if (!m_opaque_sp || (!m_opaque_sp->IsValid()
+      && (m_opaque_sp->GetRootSP()
           && !m_opaque_sp->GetRootSP()->GetError().Fail()))) {
     locker.GetError().SetErrorString("No value");
     return ValueObjectSP();
@@ -1211,10 +1210,14 @@ bool SBValue::GetDescription(SBStream &description) {
 
   ValueLocker locker;
   lldb::ValueObjectSP value_sp(GetSP(locker));
-  if (value_sp)
-    value_sp->Dump(strm);
-  else
+  if (value_sp) {
+    DumpValueObjectOptions options;
+    options.SetUseDynamicType(m_opaque_sp->GetUseDynamic());
+    options.SetUseSyntheticValue(m_opaque_sp->GetUseSynthetic());
+    value_sp->Dump(strm, options);
+  } else {
     strm.PutCString("No value");
+  }
 
   return true;
 }
@@ -1435,10 +1438,17 @@ lldb::SBWatchpoint SBValue::Watch(bool resolve_location, bool read, bool write,
       return sb_watchpoint;
 
     uint32_t watch_type = 0;
-    if (read)
+    if (read) {
       watch_type |= LLDB_WATCH_TYPE_READ;
-    if (write)
-      watch_type |= LLDB_WATCH_TYPE_WRITE;
+      // read + write, the most likely intention
+      // is to catch all writes to this, not just
+      // value modifications.
+      if (write)
+        watch_type |= LLDB_WATCH_TYPE_WRITE;
+    } else {
+      if (write)
+        watch_type |= LLDB_WATCH_TYPE_MODIFY;
+    }
 
     Status rc;
     CompilerType type(value_sp->GetCompilerType());
@@ -1499,4 +1509,15 @@ lldb::SBValue SBValue::Persist() {
     persisted_sb.SetSP(value_sp->Persist());
   }
   return persisted_sb;
+}
+
+lldb::SBValue SBValue::GetVTable() {
+  SBValue vtable_sb;
+  ValueLocker locker;
+  lldb::ValueObjectSP value_sp(GetSP(locker));
+  if (!value_sp)
+    return vtable_sb;
+
+  vtable_sb.SetSP(value_sp->GetVTable());
+  return vtable_sb;
 }

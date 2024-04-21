@@ -6,7 +6,6 @@ from lldbsuite.test import lldbutil
 
 class TestCase(TestBase):
     @expectedFailureAll(bugnumber="llvm.org/pr50814", compiler="gcc")
-    @expectedFailureAll(oslist=["windows"])
     def test_constructors(self):
         self.build()
         lldbutil.run_to_source_breakpoint(
@@ -36,19 +35,19 @@ class TestCase(TestBase):
         self.expect(
             "expr ClassWithDefaultedCtor().foo()",
             error=True,
-            substrs=["Couldn't lookup symbols:"],
+            substrs=["Couldn't look up symbols:"],
         )
 
         # FIXME: Calling deleted constructors should fail before linking.
         self.expect(
             "expr ClassWithDeletedCtor(1).value",
             error=True,
-            substrs=["Couldn't lookup symbols:"],
+            substrs=["Couldn't look up symbols:"],
         )
         self.expect(
             "expr ClassWithDeletedDefaultCtor().value",
             error=True,
-            substrs=["Couldn't lookup symbols:"],
+            substrs=["Couldn't look up symbols:", "function", "optimized out"],
         )
 
     @skipIfWindows  # Can't find operator new.

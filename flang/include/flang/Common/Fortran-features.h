@@ -27,7 +27,7 @@ ENUM_CLASS(LanguageFeature, BackslashEscapes, OldDebugLines,
     SignedPrimary, FileName, Carriagecontrol, Convert, Dispose,
     IOListLeadingComma, AbbreviatedEditDescriptor, ProgramParentheses,
     PercentRefAndVal, OmitFunctionDummies, CrayPointer, Hollerith, ArithmeticIF,
-    Assign, AssignedGOTO, Pause, OpenACC, OpenMP, CruftAfterAmpersand,
+    Assign, AssignedGOTO, Pause, OpenACC, OpenMP, CUDA, CruftAfterAmpersand,
     ClassicCComments, AdditionalFormats, BigIntLiterals, RealDoControls,
     EquivalenceNumericWithCharacter, EquivalenceNonDefaultNumeric,
     EquivalenceSameNonSequence, AdditionalIntrinsics, AnonymousParents,
@@ -36,13 +36,25 @@ ENUM_CLASS(LanguageFeature, BackslashEscapes, OldDebugLines,
     ForwardRefImplicitNone, OpenAccessAppend, BOZAsDefaultInteger,
     DistinguishableSpecifics, DefaultSave, PointerInSeqType, NonCharacterFormat,
     SaveMainProgram, SaveBigMainProgramVariables,
-    DistinctArrayConstructorLengths, PPCVector)
+    DistinctArrayConstructorLengths, PPCVector, RelaxedIntentInChecking,
+    ForwardRefImplicitNoneData, NullActualForAllocatable,
+    ActualIntegerConvertedToSmallerKind, HollerithOrCharacterAsBOZ,
+    BindingAsProcedure, StatementFunctionExtensions,
+    UseGenericIntrinsicWhenSpecificDoesntMatch, DataStmtExtensions,
+    RedundantContiguous, InitBlankCommon, EmptyBindCDerivedType,
+    MiscSourceExtensions, AllocateToOtherLength, LongNames, IntrinsicAsSpecific,
+    BenignNameClash, BenignRedundancy, NullMoldAllocatableComponentValue,
+    NopassScalarBase, MiscUseExtensions, ImpliedDoIndexScope,
+    DistinctCommonSizes, OddIndexVariableRestrictions,
+    IndistinguishableSpecifics)
 
 // Portability and suspicious usage warnings for conforming code
 ENUM_CLASS(UsageWarning, Portability, PointerToUndefinable,
     NonTargetPassedToTarget, PointerToPossibleNoncontiguous,
     ShortCharacterActual, ExprPassedToVolatile, ImplicitInterfaceActual,
-    PolymorphicTransferArg, PointerComponentTransferArg, TransferSizePresence)
+    PolymorphicTransferArg, PointerComponentTransferArg, TransferSizePresence,
+    F202XAllocatableBreakingChange, DimMustBePresent, CommonBlockPadding,
+    LogicalVsCBool, BindCCharLength, ProcDummyArgShapes, ExternalNameConflict)
 
 using LanguageFeatures = EnumSet<LanguageFeature, LanguageFeature_enumSize>;
 using UsageWarnings = EnumSet<UsageWarning, UsageWarning_enumSize>;
@@ -54,6 +66,7 @@ public:
     disable_.set(LanguageFeature::OldDebugLines);
     disable_.set(LanguageFeature::OpenACC);
     disable_.set(LanguageFeature::OpenMP);
+    disable_.set(LanguageFeature::CUDA); // !@cuf
     disable_.set(LanguageFeature::ImplicitNoneTypeNever);
     disable_.set(LanguageFeature::ImplicitNoneTypeAlways);
     disable_.set(LanguageFeature::DefaultSave);

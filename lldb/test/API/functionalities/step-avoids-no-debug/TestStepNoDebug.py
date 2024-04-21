@@ -11,6 +11,9 @@ from lldbsuite.test import lldbutil
 
 class StepAvoidsNoDebugTestCase(TestBase):
     @add_test_categories(["pyapi"])
+    @expectedFailureAll(
+        archs=["aarch64"], oslist=["windows"], bugnumber="llvm.org/pr56292"
+    )
     def test_step_out_with_python(self):
         """Test stepping out using avoid-no-debug with dsyms."""
         self.build()
@@ -26,6 +29,9 @@ class StepAvoidsNoDebugTestCase(TestBase):
         oslist=no_match(["freebsd"]),
         bugnumber="llvm.org/pr28549",
     )
+    @expectedFailureAll(
+        archs=["aarch64"], oslist=["windows"], bugnumber="llvm.org/pr56292"
+    )
     def test_step_over_with_python(self):
         """Test stepping over using avoid-no-debug with dwarf."""
         self.build()
@@ -40,6 +46,9 @@ class StepAvoidsNoDebugTestCase(TestBase):
         archs=["i386"],
         oslist=no_match(["freebsd"]),
         bugnumber="llvm.org/pr28549",
+    )
+    @expectedFailureAll(
+        archs=["aarch64"], oslist=["windows"], bugnumber="llvm.org/pr56292"
     )
     def test_step_in_with_python(self):
         """Test stepping in using avoid-no-debug with dwarf."""
@@ -74,8 +83,9 @@ class StepAvoidsNoDebugTestCase(TestBase):
 
     def hit_correct_function(self, pattern):
         name = self.thread.frames[0].GetFunctionName()
-        self.assertTrue(
-            pattern in name,
+        self.assertIn(
+            pattern,
+            name,
             "Got to '%s' not the expected function '%s'." % (name, pattern),
         )
 
@@ -100,7 +110,7 @@ class StepAvoidsNoDebugTestCase(TestBase):
 
         # Now finish, and make sure the return value is correct.
         threads = lldbutil.get_threads_stopped_at_breakpoint(self.process, inner_bkpt)
-        self.assertEquals(len(threads), 1, "Stopped at inner breakpoint.")
+        self.assertEqual(len(threads), 1, "Stopped at inner breakpoint.")
         self.thread = threads[0]
 
     def do_step_out_past_nodebug(self):

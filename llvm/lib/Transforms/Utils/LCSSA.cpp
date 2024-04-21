@@ -76,6 +76,7 @@ static bool isExitBlock(BasicBlock *BB,
 /// rewrite the uses.
 bool llvm::formLCSSAForInstructions(SmallVectorImpl<Instruction *> &Worklist,
                                     const DominatorTree &DT, const LoopInfo &LI,
+                                    ScalarEvolution *SE,
                                     SmallVectorImpl<PHINode *> *PHIsToRemove,
                                     SmallVectorImpl<PHINode *> *InsertedPHIs) {
   SmallVector<Use *, 16> UsesToRewrite;
@@ -149,6 +150,8 @@ bool llvm::formLCSSAForInstructions(SmallVectorImpl<Instruction *> &Worklist,
 
     // Insert the LCSSA phi's into all of the exit blocks dominated by the
     // value, and add them to the Phi's map.
+    bool HasSCEV = SE && SE->isSCEVable(I->getType()) &&
+                   SE->getExistingSCEV(I) != nullptr;
     for (BasicBlock *ExitBB : ExitBlocks) {
       if (!DT.dominates(DomNode, DT.getNode(ExitBB)))
         continue;
@@ -157,7 +160,8 @@ bool llvm::formLCSSAForInstructions(SmallVectorImpl<Instruction *> &Worklist,
       if (SSAUpdate.HasValueForBlock(ExitBB))
         continue;
       PHINode *PN = PHINode::Create(I->getType(), PredCache.size(ExitBB),
-                                    I->getName() + ".lcssa", &ExitBB->front());
+                                    I->getName() + ".lcssa");
+      PN->insertBefore(ExitBB->begin());
       if (InsertedPHIs)
         InsertedPHIs->push_back(PN);
       // Get the debug location from the original instruction.
@@ -196,6 +200,13 @@ bool llvm::formLCSSAForInstructions(SmallVectorImpl<Instruction *> &Worklist,
       if (auto *OtherLoop = LI.getLoopFor(ExitBB))
         if (!L->contains(OtherLoop))
           PostProcessPHIs.push_back(PN);
+
+      // If we have a cached SCEV for the original instruction, make sure the
+      // new LCSSA phi node is also cached. This makes sures that BECounts
+      // based on it will be invalidated when the LCSSA phi node is invalidated,
+      // which some passes rely on.
+      if (HasSCEV)
+        SE->getSCEV(PN);
     }
 
     // Rewrite all uses outside the loop in terms of the new PHIs we just
@@ -231,7 +242,8 @@ bool llvm::formLCSSAForInstructions(SmallVectorImpl<Instruction *> &Worklist,
     }
 
     SmallVector<DbgValueInst *, 4> DbgValues;
-    llvm::findDbgValues(DbgValues, I);
+    SmallVector<DbgVariableRecord *, 4> DbgVariableRecords;
+    llvm::findDbgValues(DbgValues, I, &DbgVariableRecords);
 
     // Update pre-existing debug value uses that reside outside the loop.
     for (auto *DVI : DbgValues) {
@@ -245,6 +257,21 @@ bool llvm::formLCSSAForInstructions(SmallVectorImpl<Instruction *> &Worklist,
                                        : SSAUpdate.FindValueForBlock(UserBB);
       if (V)
         DVI->replaceVariableLocationOp(I, V);
+    }
+
+    // RemoveDIs: copy-paste of block above, using non-instruction debug-info
+    // records.
+    for (DbgVariableRecord *DVR : DbgVariableRecords) {
+      BasicBlock *UserBB = DVR->getMarker()->getParent();
+      if (InstBB == UserBB || L->contains(UserBB))
+        continue;
+      // We currently only handle debug values residing in blocks that were
+      // traversed while rewriting the uses. If we inserted just a single PHI,
+      // we will handle all relevant debug values.
+      Value *V = AddedPHIs.size() == 1 ? AddedPHIs[0]
+                                       : SSAUpdate.FindValueForBlock(UserBB);
+      if (V)
+        DVR->replaceVariableLocationOp(I, V);
     }
 
     // SSAUpdater might have inserted phi-nodes inside other loops. We'll need
@@ -333,7 +360,8 @@ static void computeBlocksDominatingExits(
   }
 }
 
-bool llvm::formLCSSA(Loop &L, const DominatorTree &DT, const LoopInfo *LI) {
+bool llvm::formLCSSA(Loop &L, const DominatorTree &DT, const LoopInfo *LI,
+                     ScalarEvolution *SE) {
   bool Changed = false;
 
 #ifdef EXPENSIVE_CHECKS
@@ -386,7 +414,7 @@ bool llvm::formLCSSA(Loop &L, const DominatorTree &DT, const LoopInfo *LI) {
     }
   }
 
-  Changed = formLCSSAForInstructions(Worklist, DT, *LI);
+  Changed = formLCSSAForInstructions(Worklist, DT, *LI, SE);
 
   assert(L.isLCSSAForm(DT));
 
@@ -395,22 +423,23 @@ bool llvm::formLCSSA(Loop &L, const DominatorTree &DT, const LoopInfo *LI) {
 
 /// Process a loop nest depth first.
 bool llvm::formLCSSARecursively(Loop &L, const DominatorTree &DT,
-                                const LoopInfo *LI) {
+                                const LoopInfo *LI, ScalarEvolution *SE) {
   bool Changed = false;
 
   // Recurse depth-first through inner loops.
   for (Loop *SubLoop : L.getSubLoops())
-    Changed |= formLCSSARecursively(*SubLoop, DT, LI);
+    Changed |= formLCSSARecursively(*SubLoop, DT, LI, SE);
 
-  Changed |= formLCSSA(L, DT, LI);
+  Changed |= formLCSSA(L, DT, LI, SE);
   return Changed;
 }
 
 /// Process all loops in the function, inner-most out.
-static bool formLCSSAOnAllLoops(const LoopInfo *LI, const DominatorTree &DT) {
+static bool formLCSSAOnAllLoops(const LoopInfo *LI, const DominatorTree &DT,
+                                ScalarEvolution *SE) {
   bool Changed = false;
   for (const auto &L : *LI)
-    Changed |= formLCSSARecursively(*L, DT, LI);
+    Changed |= formLCSSARecursively(*L, DT, LI, SE);
   return Changed;
 }
 
@@ -424,6 +453,7 @@ struct LCSSAWrapperPass : public FunctionPass {
   // Cached analysis information for the current function.
   DominatorTree *DT;
   LoopInfo *LI;
+  ScalarEvolution *SE;
 
   bool runOnFunction(Function &F) override;
   void verifyAnalysis() const override {
@@ -480,13 +510,17 @@ char &llvm::LCSSAID = LCSSAWrapperPass::ID;
 bool LCSSAWrapperPass::runOnFunction(Function &F) {
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
-  return formLCSSAOnAllLoops(LI, *DT);
+  auto *SEWP = getAnalysisIfAvailable<ScalarEvolutionWrapperPass>();
+  SE = SEWP ? &SEWP->getSE() : nullptr;
+
+  return formLCSSAOnAllLoops(LI, *DT, SE);
 }
 
 PreservedAnalyses LCSSAPass::run(Function &F, FunctionAnalysisManager &AM) {
   auto &LI = AM.getResult<LoopAnalysis>(F);
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
-  if (!formLCSSAOnAllLoops(&LI, DT))
+  auto *SE = AM.getCachedResult<ScalarEvolutionAnalysis>(F);
+  if (!formLCSSAOnAllLoops(&LI, DT, SE))
     return PreservedAnalyses::all();
 
   PreservedAnalyses PA;

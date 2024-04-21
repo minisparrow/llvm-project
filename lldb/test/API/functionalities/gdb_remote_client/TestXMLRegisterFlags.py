@@ -348,7 +348,7 @@ class TestXMLRegisterFlags(GDBRemoteTestBase):
 
     @skipIfXmlSupportMissing
     @skipIfRemote
-    def test_flags_requried_attributes(self):
+    def test_flags_required_attributes(self):
         # flags must have an id and size so the flags with "C" is the only valid one
         # here.
         self.setup_register_test(
@@ -605,3 +605,52 @@ class TestXMLRegisterFlags(GDBRemoteTestBase):
 
         self.expect("register read x0", substrs=["(correct = 1)"])
         self.expect("register read x1", substrs=["(correct = 1)"])
+
+    @skipIfXmlSupportMissing
+    @skipIfRemote
+    def test_flags_in_register_info(self):
+        # See RegisterFlags for comprehensive formatting tests.
+        self.setup_flags_test(
+            '<field name="D" start="0" end="7"/>'
+            '<field name="C" start="8" end="15"/>'
+            '<field name="B" start="16" end="23"/>'
+            '<field name="A" start="24" end="31"/>'
+        )
+
+        # The table should split according to terminal width.
+        self.runCmd("settings set term-width 17")
+
+        self.expect(
+            "register info cpsr",
+            substrs=[
+                "       Name: cpsr\n"
+                "       Size: 4 bytes (32 bits)\n"
+                "    In sets: general (index 0)\n"
+                "\n"
+                "| 31-24 | 23-16 |\n"
+                "|-------|-------|\n"
+                "|   A   |   B   |\n"
+                "\n"
+                "| 15-8 | 7-0 |\n"
+                "|------|-----|\n"
+                "|  C   |  D  |"
+            ],
+        )
+
+    @skipIfXmlSupportMissing
+    @skipIfRemote
+    def test_flags_name_xml_reserved_characters(self):
+        """Check that lldb converts reserved character replacements like &amp;
+        when found in field names."""
+        self.setup_flags_test(
+            '<field name="E&amp;" start="0" end="0"/>'
+            '<field name="D&quot;" start="1" end="1"/>'
+            '<field name="C&apos;" start="2" end="2"/>'
+            '<field name="B&gt;" start="3" end="3"/>'
+            '<field name="A&lt;" start="4" end="4"/>'
+        )
+
+        self.expect(
+            "register info cpsr",
+            substrs=["| A< | B> | C' | D\" | E& |"],
+        )

@@ -108,6 +108,14 @@ const Scope *FindPureProcedureContaining(const Scope &start) {
   }
 }
 
+const Scope *FindOpenACCConstructContaining(const Scope *scope) {
+  return scope ? FindScopeContaining(*scope,
+                     [](const Scope &s) {
+                       return s.kind() == Scope::Kind::OpenACCConstruct;
+                     })
+               : nullptr;
+}
+
 // 7.5.2.4 "same derived type" test -- rely on IsTkCompatibleWith() and its
 // infrastructure to detect and handle comparisons on distinct (but "same")
 // sequence/bind(C) derived types
@@ -395,6 +403,18 @@ const Symbol &BypassGeneric(const Symbol &symbol) {
   return symbol;
 }
 
+const Symbol &GetCrayPointer(const Symbol &crayPointee) {
+  const Symbol *found{nullptr};
+  for (const auto &[pointee, pointer] :
+      crayPointee.GetUltimate().owner().crayPointers()) {
+    if (pointee == crayPointee.name()) {
+      found = &pointer.get();
+      break;
+    }
+  }
+  return DEREF(found);
+}
+
 bool ExprHasTypeCategory(
     const SomeExpr &expr, const common::TypeCategory &type) {
   auto dynamicType{expr.GetType()};
@@ -457,9 +477,7 @@ const Symbol *FindInterface(const Symbol &symbol) {
   return common::visit(
       common::visitors{
           [](const ProcEntityDetails &details) {
-            const Symbol *interface {
-              details.procInterface()
-            };
+            const Symbol *interface{details.procInterface()};
             return interface ? FindInterface(*interface) : nullptr;
           },
           [](const ProcBindingDetails &details) {
@@ -510,7 +528,9 @@ const Symbol *FindSubprogram(const Symbol &symbol) {
       symbol.details());
 }
 
-const Symbol *FindOverriddenBinding(const Symbol &symbol) {
+const Symbol *FindOverriddenBinding(
+    const Symbol &symbol, bool &isInaccessibleDeferred) {
+  isInaccessibleDeferred = false;
   if (symbol.has<ProcBindingDetails>()) {
     if (const DeclTypeSpec * parentType{FindParentTypeSpec(symbol.owner())}) {
       if (const DerivedTypeSpec * parentDerived{parentType->AsDerived()}) {
@@ -519,8 +539,11 @@ const Symbol *FindOverriddenBinding(const Symbol &symbol) {
               overridden{parentScope->FindComponent(symbol.name())}) {
             // 7.5.7.3 p1: only accessible bindings are overridden
             if (!overridden->attrs().test(Attr::PRIVATE) ||
-                (FindModuleContaining(overridden->owner()) ==
-                    FindModuleContaining(symbol.owner()))) {
+                FindModuleContaining(overridden->owner()) ==
+                    FindModuleContaining(symbol.owner())) {
+              return overridden;
+            } else if (overridden->attrs().test(Attr::DEFERRED)) {
+              isInaccessibleDeferred = true;
               return overridden;
             }
           }
@@ -821,19 +844,32 @@ static const Symbol *HasImpureFinal(
   return IsFinalizable(derived, nullptr, /*withImpureFinalizer=*/true, rank);
 }
 
-const Symbol *HasImpureFinal(const Symbol &original) {
+const Symbol *HasImpureFinal(const Symbol &original, std::optional<int> rank) {
   const Symbol &symbol{ResolveAssociations(original)};
   if (symbol.has<ObjectEntityDetails>()) {
     if (const DeclTypeSpec * symType{symbol.GetType()}) {
       if (const DerivedTypeSpec * derived{symType->AsDerived()}) {
-        // finalizable assumed-rank not allowed (C839)
-        return evaluate::IsAssumedRank(symbol)
-            ? nullptr
-            : HasImpureFinal(*derived, symbol.Rank());
+        if (evaluate::IsAssumedRank(symbol)) {
+          // finalizable assumed-rank not allowed (C839)
+          return nullptr;
+        } else {
+          int actualRank{rank.value_or(symbol.Rank())};
+          return HasImpureFinal(*derived, actualRank);
+        }
       }
     }
   }
   return nullptr;
+}
+
+bool MayRequireFinalization(const DerivedTypeSpec &derived) {
+  return IsFinalizable(derived) ||
+      FindPolymorphicAllocatableUltimateComponent(derived);
+}
+
+bool HasAllocatableDirectComponent(const DerivedTypeSpec &derived) {
+  DirectComponentIterator directs{derived};
+  return std::any_of(directs.begin(), directs.end(), IsAllocatable);
 }
 
 bool IsAssumedLengthCharacter(const Symbol &symbol) {
@@ -933,11 +969,12 @@ public:
   }
   bool operator()(const parser::CallStmt &stmt) {
     const auto &procedureDesignator{
-        std::get<parser::ProcedureDesignator>(stmt.v.t)};
+        std::get<parser::ProcedureDesignator>(stmt.call.t)};
     if (auto *name{std::get_if<parser::Name>(&procedureDesignator.u)}) {
       // TODO: also ensure that the procedure is, in fact, an intrinsic
       if (name->source == "move_alloc") {
-        const auto &args{std::get<std::list<parser::ActualArgSpec>>(stmt.v.t)};
+        const auto &args{
+            std::get<std::list<parser::ActualArgSpec>>(stmt.call.t)};
         if (!args.empty()) {
           const parser::ActualArg &actualArg{
               std::get<parser::ActualArg>(args.front().t)};
@@ -1063,6 +1100,18 @@ bool IsUnlimitedPolymorphic(const Symbol &symbol) {
 
 bool IsPolymorphicAllocatable(const Symbol &symbol) {
   return IsAllocatable(symbol) && IsPolymorphic(symbol);
+}
+
+const Scope *FindCUDADeviceContext(const Scope *scope) {
+  return !scope ? nullptr : FindScopeContaining(*scope, [](const Scope &s) {
+    return IsCUDADeviceContext(&s);
+  });
+}
+
+std::optional<common::CUDADataAttr> GetCUDADataAttr(const Symbol *symbol) {
+  const auto *object{
+      symbol ? symbol->detailsIf<ObjectEntityDetails>() : nullptr};
+  return object ? object->cudaDataAttr() : std::nullopt;
 }
 
 std::optional<parser::MessageFormattedText> CheckAccessibleSymbol(
@@ -1195,13 +1244,13 @@ ComponentIterator<componentKind>::const_iterator::PlanComponentTraversal(
           // Order Component (only visit parents)
           traverse = component.test(Symbol::Flag::ParentComp);
         } else if constexpr (componentKind == ComponentKind::Direct) {
-          traverse = !IsAllocatableOrPointer(component);
+          traverse = !IsAllocatableOrObjectPointer(&component);
         } else if constexpr (componentKind == ComponentKind::Ultimate) {
-          traverse = !IsAllocatableOrPointer(component);
+          traverse = !IsAllocatableOrObjectPointer(&component);
         } else if constexpr (componentKind == ComponentKind::Potential) {
           traverse = !IsPointer(component);
         } else if constexpr (componentKind == ComponentKind::Scope) {
-          traverse = !IsAllocatableOrPointer(component);
+          traverse = !IsAllocatableOrObjectPointer(&component);
         } else if constexpr (componentKind ==
             ComponentKind::PotentialAndPointer) {
           traverse = !IsPointer(component);
@@ -1235,13 +1284,16 @@ static bool StopAtComponentPre(const Symbol &component) {
     return true;
   } else if constexpr (componentKind == ComponentKind::Ultimate) {
     return component.has<ProcEntityDetails>() ||
-        IsAllocatableOrPointer(component) ||
-        (component.get<ObjectEntityDetails>().type() &&
+        IsAllocatableOrObjectPointer(&component) ||
+        (component.has<ObjectEntityDetails>() &&
+            component.get<ObjectEntityDetails>().type() &&
             component.get<ObjectEntityDetails>().type()->AsIntrinsic());
   } else if constexpr (componentKind == ComponentKind::Potential) {
     return !IsPointer(component);
   } else if constexpr (componentKind == ComponentKind::PotentialAndPointer) {
     return true;
+  } else {
+    DIE("unexpected ComponentKind");
   }
 }
 
@@ -1595,6 +1647,79 @@ bool HasDefinedIo(common::DefinedIo which, const DerivedTypeSpec &derived,
     }
   }
   return false;
+}
+
+void WarnOnDeferredLengthCharacterScalar(SemanticsContext &context,
+    const SomeExpr *expr, parser::CharBlock at, const char *what) {
+  if (context.languageFeatures().ShouldWarn(
+          common::UsageWarning::F202XAllocatableBreakingChange)) {
+    if (const Symbol *
+        symbol{evaluate::UnwrapWholeSymbolOrComponentDataRef(expr)}) {
+      const Symbol &ultimate{ResolveAssociations(*symbol)};
+      if (const DeclTypeSpec * type{ultimate.GetType()}; type &&
+          type->category() == DeclTypeSpec::Category::Character &&
+          type->characterTypeSpec().length().isDeferred() &&
+          IsAllocatable(ultimate) && ultimate.Rank() == 0) {
+        context.Say(at,
+            "The deferred length allocatable character scalar variable '%s' may be reallocated to a different length under the new Fortran 202X standard semantics for %s"_port_en_US,
+            symbol->name(), what);
+      }
+    }
+  }
+}
+
+bool CouldBeDataPointerValuedFunction(const Symbol *original) {
+  if (original) {
+    const Symbol &ultimate{original->GetUltimate()};
+    if (const Symbol * result{FindFunctionResult(ultimate)}) {
+      return IsPointer(*result) && !IsProcedure(*result);
+    }
+    if (const auto *generic{ultimate.detailsIf<GenericDetails>()}) {
+      for (const SymbolRef &ref : generic->specificProcs()) {
+        if (CouldBeDataPointerValuedFunction(&*ref)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+std::string GetModuleOrSubmoduleName(const Symbol &symbol) {
+  const auto &details{symbol.get<ModuleDetails>()};
+  std::string result{symbol.name().ToString()};
+  if (details.ancestor() && details.ancestor()->symbol()) {
+    result = details.ancestor()->symbol()->name().ToString() + ':' + result;
+  }
+  return result;
+}
+
+std::string GetCommonBlockObjectName(const Symbol &common, bool underscoring) {
+  if (const std::string * bind{common.GetBindName()}) {
+    return *bind;
+  }
+  if (common.name().empty()) {
+    return Fortran::common::blankCommonObjectName;
+  }
+  return underscoring ? common.name().ToString() + "_"s
+                      : common.name().ToString();
+}
+
+bool HadUseError(
+    SemanticsContext &context, SourceName at, const Symbol *symbol) {
+  if (const auto *details{
+          symbol ? symbol->detailsIf<UseErrorDetails>() : nullptr}) {
+    auto &msg{context.Say(
+        at, "Reference to '%s' is ambiguous"_err_en_US, symbol->name())};
+    for (const auto &[location, module] : details->occurrences()) {
+      msg.Attach(location, "'%s' was use-associated from module '%s'"_en_US, at,
+          module->GetName().value());
+    }
+    context.SetError(*symbol);
+    return true;
+  } else {
+    return false;
+  }
 }
 
 } // namespace Fortran::semantics

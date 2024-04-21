@@ -13,7 +13,6 @@
 #ifndef LLVM_MC_MCSYMBOL_H
 #define LLVM_MC_MCSYMBOL_H
 
-#include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/StringMapEntry.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/MC/MCExpr.h"
@@ -62,7 +61,7 @@ protected:
     SymContentsTargetCommon, // Index stores the section index
   };
 
-  // Special sentinal value for the absolute pseudo fragment.
+  // Special sentinel value for the absolute pseudo fragment.
   static MCFragment *AbsolutePseudoFragment;
 
   /// If a symbol has a Fragment, the section is implied, so we only need
@@ -101,6 +100,9 @@ protected:
 
   /// This symbol is private extern.
   mutable unsigned IsPrivateExtern : 1;
+
+  /// This symbol is weak external.
+  mutable unsigned IsWeakExternal : 1;
 
   /// LLVM RTTI discriminator. This is actually a SymbolKind enumerator, but is
   /// unsigned to avoid sign extension and achieve better bitpacking with MSVC.
@@ -161,8 +163,8 @@ protected:
   MCSymbol(SymbolKind Kind, const StringMapEntry<bool> *Name, bool isTemporary)
       : IsTemporary(isTemporary), IsRedefinable(false), IsUsed(false),
         IsRegistered(false), IsExternal(false), IsPrivateExtern(false),
-        Kind(Kind), IsUsedInReloc(false), SymbolContents(SymContentsUnset),
-        CommonAlignLog2(0), Flags(0) {
+        IsWeakExternal(false), Kind(Kind), IsUsedInReloc(false),
+        SymbolContents(SymContentsUnset), CommonAlignLog2(0), Flags(0) {
     Offset = 0;
     HasName = !!Name;
     if (Name)
@@ -393,8 +395,10 @@ public:
   }
 
   MCFragment *getFragment(bool SetUsed = true) const {
-    if (Fragment || !isVariable())
+    if (Fragment || !isVariable() || isWeakExternal())
       return Fragment;
+    // If the symbol is a non-weak alias, get information about
+    // the aliasee. (Don't try to resolve weak aliases.)
     Fragment = getVariableValue(SetUsed)->findAssociatedFragment();
     return Fragment;
   }
@@ -404,6 +408,8 @@ public:
 
   bool isPrivateExtern() const { return IsPrivateExtern; }
   void setPrivateExtern(bool Value) { IsPrivateExtern = Value; }
+
+  bool isWeakExternal() const { return IsWeakExternal; }
 
   /// print - Print the value to the stream \p OS.
   void print(raw_ostream &OS, const MCAsmInfo *MAI) const;

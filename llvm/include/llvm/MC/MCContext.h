@@ -26,6 +26,7 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/MD5.h"
+#include "llvm/Support/StringSaver.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cassert>
@@ -69,6 +70,10 @@ class SMDiagnostic;
 class SMLoc;
 class SourceMgr;
 enum class EmitDwarfUnwindType;
+
+namespace wasm {
+struct WasmSignature;
+}
 
 /// Context object for machine code objects.  This class owns all of the
 /// sections that it creates.
@@ -138,6 +143,8 @@ private:
   SpecificBumpPtrAllocator<MCSectionWasm> WasmAllocator;
   SpecificBumpPtrAllocator<MCSectionXCOFF> XCOFFAllocator;
   SpecificBumpPtrAllocator<MCInst> MCInstAllocator;
+
+  SpecificBumpPtrAllocator<wasm::WasmSignature> WasmSignatureAllocator;
 
   /// Bindings of names to symbols.
   SymbolTable Symbols;
@@ -451,6 +458,8 @@ public:
 
   const MCSubtargetInfo *getSubtargetInfo() const { return MSTI; }
 
+  const MCTargetOptions *getTargetOptions() const { return TargetOptions; }
+
   CodeViewContext &getCVContext();
 
   void setAllowTemporaryLabels(bool Value) { AllowTemporaryLabels = Value; }
@@ -473,9 +482,11 @@ public:
   /// \name Symbol Management
   /// @{
 
-  /// Create and return a new linker temporary symbol with a unique but
-  /// unspecified name.
+  /// Create a new linker temporary symbol with the specified prefix (Name) or
+  /// "tmp". This creates a "l"-prefixed symbol for Mach-O and is identical to
+  /// createNamedTempSymbol for other object file formats.
   MCSymbol *createLinkerPrivateTempSymbol();
+  MCSymbol *createLinkerPrivateSymbol(const Twine &Name);
 
   /// Create a temporary symbol with a unique name. The name will be omitted
   /// in the symbol table if UseNamesOnTempLabels is false (default except
@@ -533,6 +544,10 @@ public:
   /// registerInlineAsmLabel - Records that the name is a label referenced in
   /// inline assembly.
   void registerInlineAsmLabel(MCSymbol *Sym);
+
+  /// Allocates and returns a new `WasmSignature` instance (with empty parameter
+  /// and return type lists).
+  wasm::WasmSignature *createWasmSignature();
 
   /// @}
 
@@ -788,6 +803,7 @@ public:
   void setGenDwarfForAssembly(bool Value) { GenDwarfForAssembly = Value; }
   unsigned getGenDwarfFileNumber() { return GenDwarfFileNumber; }
   EmitDwarfUnwindType emitDwarfUnwindInfo() const;
+  bool emitCompactUnwindNonCanonical() const;
 
   void setGenDwarfFileNumber(unsigned FileNumber) {
     GenDwarfFileNumber = FileNumber;
@@ -844,6 +860,12 @@ public:
   }
 
   void deallocate(void *Ptr) {}
+
+  /// Allocates a copy of the given string on the allocator managed by this
+  /// context and returns the result.
+  StringRef allocateString(StringRef s) {
+    return StringSaver(Allocator).save(s);
+  }
 
   bool hadError() { return HadError; }
   void diagnose(const SMDiagnostic &SMD);

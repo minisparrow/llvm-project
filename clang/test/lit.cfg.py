@@ -90,6 +90,7 @@ tools = [
     "clang-offload-packager",
     "clang-tblgen",
     "clang-scan-deps",
+    "clang-installapi",
     "opt",
     "llvm-ifs",
     "yaml2obj",
@@ -97,6 +98,7 @@ tools = [
     "llvm-lto",
     "llvm-lto2",
     "llvm-profdata",
+    "llvm-readtapi",
     ToolSubst(
         "%clang_extdef_map",
         command=FindTool("clang-extdef-mapping"),
@@ -127,9 +129,38 @@ def have_host_jit_feature_support(feature_name):
 
     return "true" in clang_repl_out
 
+def have_host_clang_repl_cuda():
+    clang_repl_exe = lit.util.which('clang-repl', config.clang_tools_dir)
 
-if have_host_jit_feature_support("jit"):
-    config.available_features.add("host-supports-jit")
+    if not clang_repl_exe:
+        return False
+
+    testcode = b'\n'.join([
+        b"__global__ void test_func() {}",
+        b"test_func<<<1,1>>>();",
+        b"extern \"C\" int puts(const char *s);",
+        b"puts(cudaGetLastError() ? \"failure\" : \"success\");",
+        b"%quit"
+    ])
+    try:
+        clang_repl_cmd = subprocess.run([clang_repl_exe, '--cuda'],
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE,
+                                        input=testcode)
+    except OSError:
+        return False
+
+    if clang_repl_cmd.returncode == 0:
+        if clang_repl_cmd.stdout.find(b"success") != -1:
+            return True
+
+    return False
+
+if have_host_jit_feature_support('jit'):
+    config.available_features.add('host-supports-jit')
+
+    if have_host_clang_repl_cuda():
+        config.available_features.add('host-supports-cuda')
 
 if config.clang_staticanalyzer:
     config.available_features.add("staticanalyzer")
@@ -303,43 +334,6 @@ if config.have_llvm_driver:
     config.available_features.add("llvm-driver")
 
 
-def exclude_unsupported_files_for_aix(dirname):
-    for filename in os.listdir(dirname):
-        source_path = os.path.join(dirname, filename)
-        if os.path.isdir(source_path):
-            continue
-        f = open(source_path, "r", encoding="ISO-8859-1")
-        try:
-            data = f.read()
-            # 64-bit object files are not supported on AIX, so exclude the tests.
-            if (
-                any(
-                    option in data
-                    for option in (
-                        "-emit-obj",
-                        "-fmodule-format=obj",
-                        "-fintegrated-as",
-                    )
-                )
-                and "64" in config.target_triple
-            ):
-                config.excludes += [filename]
-        finally:
-            f.close()
-
-
-if "aix" in config.target_triple:
-    for directory in (
-        "/CodeGenCXX",
-        "/Misc",
-        "/Modules",
-        "/PCH",
-        "/Driver",
-        "/ASTMerge/anonymous-fields",
-        "/ASTMerge/injected-class-name-decl",
-    ):
-        exclude_unsupported_files_for_aix(config.test_source_root + directory)
-
 # Some tests perform deep recursion, which requires a larger pthread stack size
 # than the relatively low default of 192 KiB for 64-bit processes on AIX. The
 # `AIXTHREAD_STK` environment variable provides a non-intrusive way to request
@@ -351,16 +345,17 @@ if "AIXTHREAD_STK" in os.environ:
 elif platform.system() == "AIX":
     config.environment["AIXTHREAD_STK"] = "4194304"
 
-# The llvm-nm tool supports an environment variable "OBJECT_MODE" on AIX OS, which
+# Some tools support an environment variable "OBJECT_MODE" on AIX OS, which
 # controls the kind of objects they will support. If there is no "OBJECT_MODE"
 # environment variable specified, the default behaviour is to support 32-bit
 # objects only. In order to not affect most test cases, which expect to support
 # 32-bit and 64-bit objects by default, set the environment variable
-# "OBJECT_MODE" to 'any' for llvm-nm on AIX OS.
+# "OBJECT_MODE" to "any" by default on AIX OS.
 
 if "system-aix" in config.available_features:
-    config.substitutions.append(("llvm-nm", "env OBJECT_MODE=any llvm-nm"))
-    config.substitutions.append(("llvm-ar", "env OBJECT_MODE=any llvm-ar"))
+   config.substitutions.append(("llvm-nm", "env OBJECT_MODE=any llvm-nm"))
+   config.substitutions.append(("llvm-ar", "env OBJECT_MODE=any llvm-ar"))
+   config.substitutions.append(("llvm-ranlib", "env OBJECT_MODE=any llvm-ranlib"))
 
 # It is not realistically possible to account for all options that could
 # possibly be present in system and user configuration files, so disable

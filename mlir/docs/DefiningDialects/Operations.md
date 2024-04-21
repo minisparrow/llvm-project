@@ -165,9 +165,10 @@ let description = [{
 Placing the documentation at the beginning is recommended since it helps in
 understanding the operation.
 
-> *   Place documentation at the beginning of the operation definition
-> *   The summary should be short and concise. It should be a one-liner without
->     trailing punctuation. Put expanded explanation in description.
+> *   Place documentation at the beginning of the operation definition.
+> *   The summary should be short and concise. It should be a one-liner
+>     starting with a capital letter and without trailing punctuation.
+>     Put expanded explanation in the description.
 
 ### Operation arguments
 
@@ -639,12 +640,22 @@ The available directives are as follows:
 
 *   `attr-dict`
 
-    -   Represents the attribute dictionary of the operation.
+    -   Represents the attribute dictionary of the operation. Any inherent 
+    -   attributes that are not used elsewhere in the format are printed as
+    -   part of the attribute dictionary unless a `prop-dict` is present.
+    -   Discardable attributes are always part of the `attr-dict`.  
 
 *   `attr-dict-with-keyword`
 
     -   Represents the attribute dictionary of the operation, but prefixes the
         dictionary with an `attributes` keyword.
+
+*   `prop-dict`
+
+    -   Represents the properties of the operation converted to a dictionary.
+    -   Any property or inherent attribute that are not used elsewhere in the
+    -   format are parsed and printed as part of this dictionary.
+    -   If present, the `attr-dict` will not contain any inherent attributes.
 
 *   `custom` < UserDirective > ( Params )
 

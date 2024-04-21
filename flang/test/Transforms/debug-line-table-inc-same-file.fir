@@ -1,6 +1,6 @@
 
-// RUN: fir-opt --add-debug-foundation --mlir-print-debuginfo %s | FileCheck %s
-// REQUIRES: linux
+// RUN: fir-opt --add-debug-info --mlir-print-debuginfo %s | FileCheck %s
+// REQUIRES: system-linux
 
 // Test that there is only one FileAttribute generated for multiple functions
 // in the same file.

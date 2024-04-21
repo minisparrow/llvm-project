@@ -13,10 +13,14 @@
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
-#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Matchers.h"
-#include "mlir/IR/ValueRange.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/MemorySlotInterfaces.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
+
+#define DEBUG_TYPE "sroa"
 
 using namespace mlir;
 
@@ -24,18 +28,11 @@ using namespace mlir;
 // Interfaces for AllocaOp
 //===----------------------------------------------------------------------===//
 
-static Type getAllocaElementType(LLVM::AllocaOp alloca) {
-  // This will become trivial once non-opaque pointers are gone.
-  return alloca.getElemType().has_value()
-             ? *alloca.getElemType()
-             : alloca.getResult().getType().getElementType();
-}
-
 llvm::SmallVector<MemorySlot> LLVM::AllocaOp::getPromotableSlots() {
   if (!getOperation()->getBlock()->isEntryBlock())
     return {};
 
-  return {MemorySlot{getResult(), getAllocaElementType(*this)}};
+  return {MemorySlot{getResult(), getElemType()}};
 }
 
 Value LLVM::AllocaOp::getDefaultValue(const MemorySlot &slot,
@@ -49,7 +46,8 @@ void LLVM::AllocaOp::handleBlockArgument(const MemorySlot &slot,
   for (Operation *user : getOperation()->getUsers())
     if (auto declareOp = llvm::dyn_cast<LLVM::DbgDeclareOp>(user))
       rewriter.create<LLVM::DbgValueOp>(declareOp.getLoc(), argument,
-                                        declareOp.getVarInfo());
+                                        declareOp.getVarInfo(),
+                                        declareOp.getLocationExpr());
 }
 
 void LLVM::AllocaOp::handlePromotionComplete(const MemorySlot &slot,
@@ -64,8 +62,7 @@ SmallVector<DestructurableMemorySlot> LLVM::AllocaOp::getDestructurableSlots() {
   if (!mlir::matchPattern(getArraySize(), m_One()))
     return {};
 
-  Type elemType = getAllocaElementType(*this);
-  auto destructurable = dyn_cast<DestructurableTypeInterface>(elemType);
+  auto destructurable = dyn_cast<DestructurableTypeInterface>(getElemType());
   if (!destructurable)
     return {};
 
@@ -74,11 +71,8 @@ SmallVector<DestructurableMemorySlot> LLVM::AllocaOp::getDestructurableSlots() {
   if (!destructuredType)
     return {};
 
-  DenseMap<Attribute, Type> allocaTypeMap;
-  for (Attribute index : llvm::make_first_range(destructuredType.value()))
-    allocaTypeMap.insert({index, LLVM::LLVMPointerType::get(getContext())});
-
-  return {DestructurableMemorySlot{{getResult(), elemType}, {allocaTypeMap}}};
+  return {DestructurableMemorySlot{{getResult(), getElemType()},
+                                   *destructuredType}};
 }
 
 DenseMap<Attribute, MemorySlot>
@@ -86,12 +80,9 @@ LLVM::AllocaOp::destructure(const DestructurableMemorySlot &slot,
                             const SmallPtrSetImpl<Attribute> &usedIndices,
                             RewriterBase &rewriter) {
   assert(slot.ptr == getResult());
-  Type elemType =
-      getElemType() ? *getElemType() : getResult().getType().getElementType();
-
   rewriter.setInsertionPointAfter(*this);
 
-  auto destructurableType = cast<DestructurableTypeInterface>(elemType);
+  auto destructurableType = cast<DestructurableTypeInterface>(getElemType());
   DenseMap<Attribute, MemorySlot> slotMap;
   for (Attribute index : usedIndices) {
     Type elemType = destructurableType.getTypeAtIndex(index);
@@ -119,17 +110,140 @@ bool LLVM::LoadOp::loadsFrom(const MemorySlot &slot) {
   return getAddr() == slot.ptr;
 }
 
-Value LLVM::LoadOp::getStored(const MemorySlot &slot) { return {}; }
+bool LLVM::LoadOp::storesTo(const MemorySlot &slot) { return false; }
+
+Value LLVM::LoadOp::getStored(const MemorySlot &slot, RewriterBase &rewriter,
+                              const DataLayout &dataLayout) {
+  llvm_unreachable("getStored should not be called on LoadOp");
+}
 
 bool LLVM::StoreOp::loadsFrom(const MemorySlot &slot) { return false; }
 
-Value LLVM::StoreOp::getStored(const MemorySlot &slot) {
-  return getAddr() == slot.ptr ? getValue() : Value();
+bool LLVM::StoreOp::storesTo(const MemorySlot &slot) {
+  return getAddr() == slot.ptr;
+}
+
+/// Checks if `type` can be used in any kind of conversion sequences.
+static bool isSupportedTypeForConversion(Type type) {
+  // Aggregate types are not bitcastable.
+  if (isa<LLVM::LLVMStructType, LLVM::LLVMArrayType>(type))
+    return false;
+
+  // LLVM vector types are only used for either pointers or target specific
+  // types. These types cannot be casted in the general case, thus the memory
+  // optimizations do not support them.
+  if (isa<LLVM::LLVMFixedVectorType, LLVM::LLVMScalableVectorType>(type))
+    return false;
+
+  // Scalable types are not supported.
+  if (auto vectorType = dyn_cast<VectorType>(type))
+    return !vectorType.isScalable();
+  return true;
+}
+
+/// Checks that `rhs` can be converted to `lhs` by a sequence of casts and
+/// truncations.
+static bool areConversionCompatible(const DataLayout &layout, Type targetType,
+                                    Type srcType) {
+  if (targetType == srcType)
+    return true;
+
+  if (!isSupportedTypeForConversion(targetType) ||
+      !isSupportedTypeForConversion(srcType))
+    return false;
+
+  // Pointer casts will only be sane when the bitsize of both pointer types is
+  // the same.
+  if (isa<LLVM::LLVMPointerType>(targetType) &&
+      isa<LLVM::LLVMPointerType>(srcType))
+    return layout.getTypeSize(targetType) == layout.getTypeSize(srcType);
+
+  return layout.getTypeSize(targetType) <= layout.getTypeSize(srcType);
+}
+
+/// Checks if `dataLayout` describes a little endian layout.
+static bool isBigEndian(const DataLayout &dataLayout) {
+  auto endiannessStr = dyn_cast_or_null<StringAttr>(dataLayout.getEndianness());
+  return endiannessStr && endiannessStr == "big";
+}
+
+/// The size of a byte in bits.
+constexpr const static uint64_t kBitsInByte = 8;
+
+/// Constructs operations that convert `inputValue` into a new value of type
+/// `targetType`. Assumes that this conversion is possible.
+static Value createConversionSequence(RewriterBase &rewriter, Location loc,
+                                      Value srcValue, Type targetType,
+                                      const DataLayout &dataLayout) {
+  // Get the types of the source and target values.
+  Type srcType = srcValue.getType();
+  assert(areConversionCompatible(dataLayout, targetType, srcType) &&
+         "expected that the compatibility was checked before");
+
+  uint64_t srcTypeSize = dataLayout.getTypeSize(srcType);
+  uint64_t targetTypeSize = dataLayout.getTypeSize(targetType);
+
+  // Nothing has to be done if the types are already the same.
+  if (srcType == targetType)
+    return srcValue;
+
+  // In the special case of casting one pointer to another, we want to generate
+  // an address space cast. Bitcasts of pointers are not allowed and using
+  // pointer to integer conversions are not equivalent due to the loss of
+  // provenance.
+  if (isa<LLVM::LLVMPointerType>(targetType) &&
+      isa<LLVM::LLVMPointerType>(srcType))
+    return rewriter.createOrFold<LLVM::AddrSpaceCastOp>(loc, targetType,
+                                                        srcValue);
+
+  IntegerType valueSizeInteger =
+      rewriter.getIntegerType(srcTypeSize * kBitsInByte);
+  Value replacement = srcValue;
+
+  // First, cast the value to a same-sized integer type.
+  if (isa<LLVM::LLVMPointerType>(srcType))
+    replacement = rewriter.createOrFold<LLVM::PtrToIntOp>(loc, valueSizeInteger,
+                                                          replacement);
+  else if (replacement.getType() != valueSizeInteger)
+    replacement = rewriter.createOrFold<LLVM::BitcastOp>(loc, valueSizeInteger,
+                                                         replacement);
+
+  // Truncate the integer if the size of the target is less than the value.
+  if (targetTypeSize != srcTypeSize) {
+    if (isBigEndian(dataLayout)) {
+      uint64_t shiftAmount = (srcTypeSize - targetTypeSize) * kBitsInByte;
+      auto shiftConstant = rewriter.create<LLVM::ConstantOp>(
+          loc, rewriter.getIntegerAttr(srcType, shiftAmount));
+      replacement =
+          rewriter.createOrFold<LLVM::LShrOp>(loc, srcValue, shiftConstant);
+    }
+
+    replacement = rewriter.create<LLVM::TruncOp>(
+        loc, rewriter.getIntegerType(targetTypeSize * kBitsInByte),
+        replacement);
+  }
+
+  // Now cast the integer to the actual target type if required.
+  if (isa<LLVM::LLVMPointerType>(targetType))
+    replacement =
+        rewriter.createOrFold<LLVM::IntToPtrOp>(loc, targetType, replacement);
+  else if (replacement.getType() != targetType)
+    replacement =
+        rewriter.createOrFold<LLVM::BitcastOp>(loc, targetType, replacement);
+
+  return replacement;
+}
+
+Value LLVM::StoreOp::getStored(const MemorySlot &slot, RewriterBase &rewriter,
+                               const DataLayout &dataLayout) {
+  return createConversionSequence(rewriter, getLoc(), getValue(), slot.elemType,
+                                  dataLayout);
 }
 
 bool LLVM::LoadOp::canUsesBeRemoved(
     const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
-    SmallVectorImpl<OpOperand *> &newBlockingUses) {
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
   if (blockingUses.size() != 1)
     return false;
   Value blockingUse = (*blockingUses.begin())->get();
@@ -138,21 +252,28 @@ bool LLVM::LoadOp::canUsesBeRemoved(
   // be removed (provided it loads the exact stored value and is not
   // volatile).
   return blockingUse == slot.ptr && getAddr() == slot.ptr &&
-         getResult().getType() == slot.elemType && !getVolatile_();
+         areConversionCompatible(dataLayout, getResult().getType(),
+                                 slot.elemType) &&
+         !getVolatile_();
 }
 
 DeletionKind LLVM::LoadOp::removeBlockingUses(
     const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
-    RewriterBase &rewriter, Value reachingDefinition) {
+    RewriterBase &rewriter, Value reachingDefinition,
+    const DataLayout &dataLayout) {
   // `canUsesBeRemoved` checked this blocking use must be the loaded slot
   // pointer.
-  rewriter.replaceAllUsesWith(getResult(), reachingDefinition);
+  Value newResult =
+      createConversionSequence(rewriter, getLoc(), reachingDefinition,
+                               getResult().getType(), dataLayout);
+  rewriter.replaceAllUsesWith(getResult(), newResult);
   return DeletionKind::Delete;
 }
 
 bool LLVM::StoreOp::canUsesBeRemoved(
     const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
-    SmallVectorImpl<OpOperand *> &newBlockingUses) {
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
   if (blockingUses.size() != 1)
     return false;
   Value blockingUse = (*blockingUses.begin())->get();
@@ -160,31 +281,124 @@ bool LLVM::StoreOp::canUsesBeRemoved(
   // fine, provided we are currently promoting its target value. Don't allow a
   // store OF the slot pointer, only INTO the slot pointer.
   return blockingUse == slot.ptr && getAddr() == slot.ptr &&
-         getValue() != slot.ptr && getValue().getType() == slot.elemType &&
+         getValue() != slot.ptr &&
+         areConversionCompatible(dataLayout, slot.elemType,
+                                 getValue().getType()) &&
          !getVolatile_();
 }
 
 DeletionKind LLVM::StoreOp::removeBlockingUses(
     const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
-    RewriterBase &rewriter, Value reachingDefinition) {
-  // `canUsesBeRemoved` checked this blocking use must be the stored slot
-  // pointer.
-  for (Operation *user : slot.ptr.getUsers())
-    if (auto declareOp = dyn_cast<LLVM::DbgDeclareOp>(user))
-      rewriter.create<LLVM::DbgValueOp>(declareOp->getLoc(), getValue(),
-                                        declareOp.getVarInfo());
+    RewriterBase &rewriter, Value reachingDefinition,
+    const DataLayout &dataLayout) {
   return DeletionKind::Delete;
 }
 
+/// Checks if `slot` can be accessed through the provided access type.
+static bool isValidAccessType(const MemorySlot &slot, Type accessType,
+                              const DataLayout &dataLayout) {
+  return dataLayout.getTypeSize(accessType) <=
+         dataLayout.getTypeSize(slot.elemType);
+}
+
 LogicalResult LLVM::LoadOp::ensureOnlySafeAccesses(
-    const MemorySlot &slot, SmallVectorImpl<MemorySlot> &mustBeSafelyUsed) {
-  return success(getAddr() != slot.ptr || getType() == slot.elemType);
+    const MemorySlot &slot, SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+    const DataLayout &dataLayout) {
+  return success(getAddr() != slot.ptr ||
+                 isValidAccessType(slot, getType(), dataLayout));
 }
 
 LogicalResult LLVM::StoreOp::ensureOnlySafeAccesses(
-    const MemorySlot &slot, SmallVectorImpl<MemorySlot> &mustBeSafelyUsed) {
+    const MemorySlot &slot, SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+    const DataLayout &dataLayout) {
   return success(getAddr() != slot.ptr ||
-                 getValue().getType() == slot.elemType);
+                 isValidAccessType(slot, getValue().getType(), dataLayout));
+}
+
+/// Returns the subslot's type at the requested index.
+static Type getTypeAtIndex(const DestructurableMemorySlot &slot,
+                           Attribute index) {
+  auto subelementIndexMap =
+      cast<DestructurableTypeInterface>(slot.elemType).getSubelementIndexMap();
+  if (!subelementIndexMap)
+    return {};
+  assert(!subelementIndexMap->empty());
+
+  // Note: Returns a null-type when no entry was found.
+  return subelementIndexMap->lookup(index);
+}
+
+bool LLVM::LoadOp::canRewire(const DestructurableMemorySlot &slot,
+                             SmallPtrSetImpl<Attribute> &usedIndices,
+                             SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+                             const DataLayout &dataLayout) {
+  if (getVolatile_())
+    return false;
+
+  // A load always accesses the first element of the destructured slot.
+  auto index = IntegerAttr::get(IntegerType::get(getContext(), 32), 0);
+  Type subslotType = getTypeAtIndex(slot, index);
+  if (!subslotType)
+    return false;
+
+  // The access can only be replaced when the subslot is read within its bounds.
+  if (dataLayout.getTypeSize(getType()) > dataLayout.getTypeSize(subslotType))
+    return false;
+
+  usedIndices.insert(index);
+  return true;
+}
+
+DeletionKind LLVM::LoadOp::rewire(const DestructurableMemorySlot &slot,
+                                  DenseMap<Attribute, MemorySlot> &subslots,
+                                  RewriterBase &rewriter,
+                                  const DataLayout &dataLayout) {
+  auto index = IntegerAttr::get(IntegerType::get(getContext(), 32), 0);
+  auto it = subslots.find(index);
+  assert(it != subslots.end());
+
+  rewriter.modifyOpInPlace(
+      *this, [&]() { getAddrMutable().set(it->getSecond().ptr); });
+  return DeletionKind::Keep;
+}
+
+bool LLVM::StoreOp::canRewire(const DestructurableMemorySlot &slot,
+                              SmallPtrSetImpl<Attribute> &usedIndices,
+                              SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+                              const DataLayout &dataLayout) {
+  if (getVolatile_())
+    return false;
+
+  // Storing the pointer to memory cannot be dealt with.
+  if (getValue() == slot.ptr)
+    return false;
+
+  // A store always accesses the first element of the destructured slot.
+  auto index = IntegerAttr::get(IntegerType::get(getContext(), 32), 0);
+  Type subslotType = getTypeAtIndex(slot, index);
+  if (!subslotType)
+    return false;
+
+  // The access can only be replaced when the subslot is read within its bounds.
+  if (dataLayout.getTypeSize(getValue().getType()) >
+      dataLayout.getTypeSize(subslotType))
+    return false;
+
+  usedIndices.insert(index);
+  return true;
+}
+
+DeletionKind LLVM::StoreOp::rewire(const DestructurableMemorySlot &slot,
+                                   DenseMap<Attribute, MemorySlot> &subslots,
+                                   RewriterBase &rewriter,
+                                   const DataLayout &dataLayout) {
+  auto index = IntegerAttr::get(IntegerType::get(getContext(), 32), 0);
+  auto it = subslots.find(index);
+  assert(it != subslots.end());
+
+  rewriter.modifyOpInPlace(
+      *this, [&]() { getAddrMutable().set(it->getSecond().ptr); });
+  return DeletionKind::Keep;
 }
 
 //===----------------------------------------------------------------------===//
@@ -202,7 +416,8 @@ static bool forwardToUsers(Operation *op,
 
 bool LLVM::BitcastOp::canUsesBeRemoved(
     const SmallPtrSetImpl<OpOperand *> &blockingUses,
-    SmallVectorImpl<OpOperand *> &newBlockingUses) {
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
   return forwardToUsers(*this, newBlockingUses);
 }
 
@@ -213,7 +428,8 @@ DeletionKind LLVM::BitcastOp::removeBlockingUses(
 
 bool LLVM::AddrSpaceCastOp::canUsesBeRemoved(
     const SmallPtrSetImpl<OpOperand *> &blockingUses,
-    SmallVectorImpl<OpOperand *> &newBlockingUses) {
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
   return forwardToUsers(*this, newBlockingUses);
 }
 
@@ -224,7 +440,8 @@ DeletionKind LLVM::AddrSpaceCastOp::removeBlockingUses(
 
 bool LLVM::LifetimeStartOp::canUsesBeRemoved(
     const SmallPtrSetImpl<OpOperand *> &blockingUses,
-    SmallVectorImpl<OpOperand *> &newBlockingUses) {
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
   return true;
 }
 
@@ -235,7 +452,8 @@ DeletionKind LLVM::LifetimeStartOp::removeBlockingUses(
 
 bool LLVM::LifetimeEndOp::canUsesBeRemoved(
     const SmallPtrSetImpl<OpOperand *> &blockingUses,
-    SmallVectorImpl<OpOperand *> &newBlockingUses) {
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
   return true;
 }
 
@@ -244,15 +462,77 @@ DeletionKind LLVM::LifetimeEndOp::removeBlockingUses(
   return DeletionKind::Delete;
 }
 
+bool LLVM::InvariantStartOp::canUsesBeRemoved(
+    const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
+  return true;
+}
+
+DeletionKind LLVM::InvariantStartOp::removeBlockingUses(
+    const SmallPtrSetImpl<OpOperand *> &blockingUses, RewriterBase &rewriter) {
+  return DeletionKind::Delete;
+}
+
+bool LLVM::InvariantEndOp::canUsesBeRemoved(
+    const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
+  return true;
+}
+
+DeletionKind LLVM::InvariantEndOp::removeBlockingUses(
+    const SmallPtrSetImpl<OpOperand *> &blockingUses, RewriterBase &rewriter) {
+  return DeletionKind::Delete;
+}
+
 bool LLVM::DbgDeclareOp::canUsesBeRemoved(
     const SmallPtrSetImpl<OpOperand *> &blockingUses,
-    SmallVectorImpl<OpOperand *> &newBlockingUses) {
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
   return true;
 }
 
 DeletionKind LLVM::DbgDeclareOp::removeBlockingUses(
     const SmallPtrSetImpl<OpOperand *> &blockingUses, RewriterBase &rewriter) {
   return DeletionKind::Delete;
+}
+
+bool LLVM::DbgValueOp::canUsesBeRemoved(
+    const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
+  // There is only one operand that we can remove the use of.
+  if (blockingUses.size() != 1)
+    return false;
+
+  return (*blockingUses.begin())->get() == getValue();
+}
+
+DeletionKind LLVM::DbgValueOp::removeBlockingUses(
+    const SmallPtrSetImpl<OpOperand *> &blockingUses, RewriterBase &rewriter) {
+  // Rewriter by default is after '*this', but we need it before '*this'.
+  rewriter.setInsertionPoint(*this);
+
+  // Rather than dropping the debug value, replace it with undef to preserve the
+  // debug local variable info. This allows the debugger to inform the user that
+  // the variable has been optimized out.
+  auto undef =
+      rewriter.create<UndefOp>(getValue().getLoc(), getValue().getType());
+  rewriter.modifyOpInPlace(*this, [&] { getValueMutable().assign(undef); });
+  return DeletionKind::Keep;
+}
+
+bool LLVM::DbgDeclareOp::requiresReplacedValues() { return true; }
+
+void LLVM::DbgDeclareOp::visitReplacedValues(
+    ArrayRef<std::pair<Operation *, Value>> definitions,
+    RewriterBase &rewriter) {
+  for (auto [op, value] : definitions) {
+    rewriter.setInsertionPointAfter(op);
+    rewriter.create<LLVM::DbgValueOp>(getLoc(), value, getVarInfo(),
+                                      getLocationExpr());
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -268,7 +548,8 @@ static bool hasAllZeroIndices(LLVM::GEPOp gepOp) {
 
 bool LLVM::GEPOp::canUsesBeRemoved(
     const SmallPtrSetImpl<OpOperand *> &blockingUses,
-    SmallVectorImpl<OpOperand *> &newBlockingUses) {
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
   // GEP can be removed as long as it is a no-op and its users can be removed.
   if (!hasAllZeroIndices(*this))
     return false;
@@ -280,124 +561,736 @@ DeletionKind LLVM::GEPOp::removeBlockingUses(
   return DeletionKind::Delete;
 }
 
-/// Returns the type the resulting pointer of the GEP points to. If such a type
-/// is not clear, returns null type.
-static Type computeReachedGEPType(LLVM::GEPOp gep) {
-  if (gep.getIndices().empty())
-    return {};
-
-  // Ensures all indices are static and fetches them.
-  SmallVector<IntegerAttr> indices;
+/// Returns the amount of bytes the provided GEP elements will offset the
+/// pointer by. Returns nullopt if no constant offset could be computed.
+static std::optional<uint64_t> gepToByteOffset(const DataLayout &dataLayout,
+                                               LLVM::GEPOp gep) {
+  // Collects all indices.
+  SmallVector<uint64_t> indices;
   for (auto index : gep.getIndices()) {
-    IntegerAttr indexInt = llvm::dyn_cast_if_present<IntegerAttr>(index);
-    if (!indexInt)
+    auto constIndex = dyn_cast<IntegerAttr>(index);
+    if (!constIndex)
       return {};
-    indices.push_back(indexInt);
+    int64_t gepIndex = constIndex.getInt();
+    // Negative indices are not supported.
+    if (gepIndex < 0)
+      return {};
+    indices.push_back(gepIndex);
   }
 
-  // Check the pointer indexing only targets the first element.
-  if (indices[0].getInt() != 0)
-    return {};
+  Type currentType = gep.getElemType();
+  uint64_t offset = indices[0] * dataLayout.getTypeSize(currentType);
 
-  // Set the initial type currently being used for indexing. This will be
-  // updated as the indices get walked over.
-  std::optional<Type> maybeSelectedType = gep.getElemType();
-  if (!maybeSelectedType)
-    return {};
-  Type selectedType = *maybeSelectedType;
+  for (uint64_t index : llvm::drop_begin(indices)) {
+    bool shouldCancel =
+        TypeSwitch<Type, bool>(currentType)
+            .Case([&](LLVM::LLVMArrayType arrayType) {
+              offset +=
+                  index * dataLayout.getTypeSize(arrayType.getElementType());
+              currentType = arrayType.getElementType();
+              return false;
+            })
+            .Case([&](LLVM::LLVMStructType structType) {
+              ArrayRef<Type> body = structType.getBody();
+              assert(index < body.size() && "expected valid struct indexing");
+              for (uint32_t i : llvm::seq(index)) {
+                if (!structType.isPacked())
+                  offset = llvm::alignTo(
+                      offset, dataLayout.getTypeABIAlignment(body[i]));
+                offset += dataLayout.getTypeSize(body[i]);
+              }
 
-  // Follow the indexed elements in the gep.
-  for (IntegerAttr index : llvm::drop_begin(indices)) {
-    // Ensure the structure of the type being indexed can be reasoned about.
-    // This includes rejecting any potential typed pointer.
-    auto destructurable = llvm::dyn_cast<DestructurableTypeInterface>(selectedType);
-    if (!destructurable)
-      return {};
+              // Align for the current type as well.
+              if (!structType.isPacked())
+                offset = llvm::alignTo(
+                    offset, dataLayout.getTypeABIAlignment(body[index]));
+              currentType = body[index];
+              return false;
+            })
+            .Default([&](Type type) {
+              LLVM_DEBUG(llvm::dbgs()
+                         << "[sroa] Unsupported type for offset computations"
+                         << type << "\n");
+              return true;
+            });
 
-    // Follow the type at the index the gep is accessing, making it the new type
-    // used for indexing.
-    Type field = destructurable.getTypeAtIndex(index);
-    if (!field)
-      return {};
-    selectedType = field;
+    if (shouldCancel)
+      return std::nullopt;
   }
 
-  // When there are no more indices, the type currently being used for indexing
-  // is the type of the value pointed at by the returned indexed pointer.
-  return selectedType;
+  return offset;
+}
+
+namespace {
+/// A struct that stores both the index into the aggregate type of the slot as
+/// well as the corresponding byte offset in memory.
+struct SubslotAccessInfo {
+  /// The parent slot's index that the access falls into.
+  uint32_t index;
+  /// The offset into the subslot of the access.
+  uint64_t subslotOffset;
+};
+} // namespace
+
+/// Computes subslot access information for an access into `slot` with the given
+/// offset.
+/// Returns nullopt when the offset is out-of-bounds or when the access is into
+/// the padding of `slot`.
+static std::optional<SubslotAccessInfo>
+getSubslotAccessInfo(const DestructurableMemorySlot &slot,
+                     const DataLayout &dataLayout, LLVM::GEPOp gep) {
+  std::optional<uint64_t> offset = gepToByteOffset(dataLayout, gep);
+  if (!offset)
+    return {};
+
+  // Helper to check that a constant index is in the bounds of the GEP index
+  // representation. LLVM dialects's GEP arguments have a limited bitwidth, thus
+  // this additional check is necessary.
+  auto isOutOfBoundsGEPIndex = [](uint64_t index) {
+    return index >= (1 << LLVM::kGEPConstantBitWidth);
+  };
+
+  Type type = slot.elemType;
+  if (*offset >= dataLayout.getTypeSize(type))
+    return {};
+  return TypeSwitch<Type, std::optional<SubslotAccessInfo>>(type)
+      .Case([&](LLVM::LLVMArrayType arrayType)
+                -> std::optional<SubslotAccessInfo> {
+        // Find which element of the array contains the offset.
+        uint64_t elemSize = dataLayout.getTypeSize(arrayType.getElementType());
+        uint64_t index = *offset / elemSize;
+        if (isOutOfBoundsGEPIndex(index))
+          return {};
+        return SubslotAccessInfo{static_cast<uint32_t>(index),
+                                 *offset - (index * elemSize)};
+      })
+      .Case([&](LLVM::LLVMStructType structType)
+                -> std::optional<SubslotAccessInfo> {
+        uint64_t distanceToStart = 0;
+        // Walk over the elements of the struct to find in which of
+        // them the offset is.
+        for (auto [index, elem] : llvm::enumerate(structType.getBody())) {
+          uint64_t elemSize = dataLayout.getTypeSize(elem);
+          if (!structType.isPacked()) {
+            distanceToStart = llvm::alignTo(
+                distanceToStart, dataLayout.getTypeABIAlignment(elem));
+            // If the offset is in padding, cancel the rewrite.
+            if (offset < distanceToStart)
+              return {};
+          }
+
+          if (offset < distanceToStart + elemSize) {
+            if (isOutOfBoundsGEPIndex(index))
+              return {};
+            // The offset is within this element, stop iterating the
+            // struct and return the index.
+            return SubslotAccessInfo{static_cast<uint32_t>(index),
+                                     *offset - distanceToStart};
+          }
+
+          // The offset is not within this element, continue walking
+          // over the struct.
+          distanceToStart += elemSize;
+        }
+
+        return {};
+      });
+}
+
+/// Constructs a byte array type of the given size.
+static LLVM::LLVMArrayType getByteArrayType(MLIRContext *context,
+                                            unsigned size) {
+  auto byteType = IntegerType::get(context, 8);
+  return LLVM::LLVMArrayType::get(context, byteType, size);
 }
 
 LogicalResult LLVM::GEPOp::ensureOnlySafeAccesses(
-    const MemorySlot &slot, SmallVectorImpl<MemorySlot> &mustBeSafelyUsed) {
+    const MemorySlot &slot, SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+    const DataLayout &dataLayout) {
   if (getBase() != slot.ptr)
     return success();
-  if (slot.elemType != getElemType())
+  std::optional<uint64_t> gepOffset = gepToByteOffset(dataLayout, *this);
+  if (!gepOffset)
     return failure();
-  Type reachedType = computeReachedGEPType(*this);
-  if (!reachedType)
+  uint64_t slotSize = dataLayout.getTypeSize(slot.elemType);
+  // Check that the access is strictly inside the slot.
+  if (*gepOffset >= slotSize)
     return failure();
-  mustBeSafelyUsed.emplace_back<MemorySlot>({getResult(), reachedType});
+  // Every access that remains in bounds of the remaining slot is considered
+  // legal.
+  mustBeSafelyUsed.emplace_back<MemorySlot>(
+      {getRes(), getByteArrayType(getContext(), slotSize - *gepOffset)});
   return success();
 }
 
 bool LLVM::GEPOp::canRewire(const DestructurableMemorySlot &slot,
                             SmallPtrSetImpl<Attribute> &usedIndices,
-                            SmallVectorImpl<MemorySlot> &mustBeSafelyUsed) {
-  auto basePtrType = llvm::dyn_cast<LLVM::LLVMPointerType>(getBase().getType());
-  if (!basePtrType)
+                            SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+                            const DataLayout &dataLayout) {
+  if (!isa<LLVM::LLVMPointerType>(getBase().getType()))
     return false;
 
-  // Typed pointers are not supported. This should be removed once typed
-  // pointers are removed from the LLVM dialect.
-  if (!basePtrType.isOpaque())
+  if (getBase() != slot.ptr)
     return false;
+  std::optional<SubslotAccessInfo> accessInfo =
+      getSubslotAccessInfo(slot, dataLayout, *this);
+  if (!accessInfo)
+    return false;
+  auto indexAttr =
+      IntegerAttr::get(IntegerType::get(getContext(), 32), accessInfo->index);
+  assert(slot.elementPtrs.contains(indexAttr));
+  usedIndices.insert(indexAttr);
 
-  if (getBase() != slot.ptr || slot.elemType != getElemType())
-    return false;
-  Type reachedType = computeReachedGEPType(*this);
-  if (!reachedType || getIndices().size() < 2)
-    return false;
-  auto firstLevelIndex = cast<IntegerAttr>(getIndices()[1]);
-  assert(slot.elementPtrs.contains(firstLevelIndex));
-  if (!llvm::isa<LLVM::LLVMPointerType>(slot.elementPtrs.at(firstLevelIndex)))
-    return false;
-  mustBeSafelyUsed.emplace_back<MemorySlot>({getResult(), reachedType});
-  usedIndices.insert(firstLevelIndex);
+  // The remainder of the subslot should be accesses in-bounds. Thus, we create
+  // a dummy slot with the size of the remainder.
+  Type subslotType = slot.elementPtrs.lookup(indexAttr);
+  uint64_t slotSize = dataLayout.getTypeSize(subslotType);
+  LLVM::LLVMArrayType remainingSlotType =
+      getByteArrayType(getContext(), slotSize - accessInfo->subslotOffset);
+  mustBeSafelyUsed.emplace_back<MemorySlot>({getRes(), remainingSlotType});
+
   return true;
 }
 
 DeletionKind LLVM::GEPOp::rewire(const DestructurableMemorySlot &slot,
                                  DenseMap<Attribute, MemorySlot> &subslots,
-                                 RewriterBase &rewriter) {
-  IntegerAttr firstLevelIndex = llvm::dyn_cast_if_present<IntegerAttr>(getIndices()[1]);
-  const MemorySlot &newSlot = subslots.at(firstLevelIndex);
+                                 RewriterBase &rewriter,
+                                 const DataLayout &dataLayout) {
+  std::optional<SubslotAccessInfo> accessInfo =
+      getSubslotAccessInfo(slot, dataLayout, *this);
+  assert(accessInfo && "expected access info to be checked before");
+  auto indexAttr =
+      IntegerAttr::get(IntegerType::get(getContext(), 32), accessInfo->index);
+  const MemorySlot &newSlot = subslots.at(indexAttr);
 
-  ArrayRef<int32_t> remainingIndices = getRawConstantIndices().slice(2);
+  auto byteType = IntegerType::get(rewriter.getContext(), 8);
+  auto newPtr = rewriter.createOrFold<LLVM::GEPOp>(
+      getLoc(), getResult().getType(), byteType, newSlot.ptr,
+      ArrayRef<GEPArg>(accessInfo->subslotOffset), getInbounds());
+  rewriter.replaceAllUsesWith(getResult(), newPtr);
+  return DeletionKind::Delete;
+}
 
-  // If the GEP would become trivial after this transformation, eliminate it.
-  // A GEP should only be eliminated if it has no indices (except the first
-  // pointer index), as simplifying GEPs with all-zero indices would eliminate
-  // structure information useful for further destruction.
-  if (remainingIndices.empty()) {
-    rewriter.replaceAllUsesWith(getResult(), newSlot.ptr);
-    return DeletionKind::Delete;
+//===----------------------------------------------------------------------===//
+// Utilities for memory intrinsics
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// Returns the length of the given memory intrinsic in bytes if it can be known
+/// at compile-time on a best-effort basis, nothing otherwise.
+template <class MemIntr>
+std::optional<uint64_t> getStaticMemIntrLen(MemIntr op) {
+  APInt memIntrLen;
+  if (!matchPattern(op.getLen(), m_ConstantInt(&memIntrLen)))
+    return {};
+  if (memIntrLen.getBitWidth() > 64)
+    return {};
+  return memIntrLen.getZExtValue();
+}
+
+/// Returns the length of the given memory intrinsic in bytes if it can be known
+/// at compile-time on a best-effort basis, nothing otherwise.
+/// Because MemcpyInlineOp has its length encoded as an attribute, this requires
+/// specialized handling.
+template <>
+std::optional<uint64_t> getStaticMemIntrLen(LLVM::MemcpyInlineOp op) {
+  APInt memIntrLen = op.getLen();
+  if (memIntrLen.getBitWidth() > 64)
+    return {};
+  return memIntrLen.getZExtValue();
+}
+
+} // namespace
+
+/// Returns whether one can be sure the memory intrinsic does not write outside
+/// of the bounds of the given slot, on a best-effort basis.
+template <class MemIntr>
+static bool definitelyWritesOnlyWithinSlot(MemIntr op, const MemorySlot &slot,
+                                           const DataLayout &dataLayout) {
+  if (!isa<LLVM::LLVMPointerType>(slot.ptr.getType()) ||
+      op.getDst() != slot.ptr)
+    return false;
+
+  std::optional<uint64_t> memIntrLen = getStaticMemIntrLen(op);
+  return memIntrLen && *memIntrLen <= dataLayout.getTypeSize(slot.elemType);
+}
+
+/// Checks whether all indices are i32. This is used to check GEPs can index
+/// into them.
+static bool areAllIndicesI32(const DestructurableMemorySlot &slot) {
+  Type i32 = IntegerType::get(slot.ptr.getContext(), 32);
+  return llvm::all_of(llvm::make_first_range(slot.elementPtrs),
+                      [&](Attribute index) {
+                        auto intIndex = dyn_cast<IntegerAttr>(index);
+                        return intIndex && intIndex.getType() == i32;
+                      });
+}
+
+//===----------------------------------------------------------------------===//
+// Interfaces for memset
+//===----------------------------------------------------------------------===//
+
+bool LLVM::MemsetOp::loadsFrom(const MemorySlot &slot) { return false; }
+
+bool LLVM::MemsetOp::storesTo(const MemorySlot &slot) {
+  return getDst() == slot.ptr;
+}
+
+Value LLVM::MemsetOp::getStored(const MemorySlot &slot, RewriterBase &rewriter,
+                                const DataLayout &dataLayout) {
+  // TODO: Support non-integer types.
+  return TypeSwitch<Type, Value>(slot.elemType)
+      .Case([&](IntegerType intType) -> Value {
+        if (intType.getWidth() == 8)
+          return getVal();
+
+        assert(intType.getWidth() % 8 == 0);
+
+        // Build the memset integer by repeatedly shifting the value and
+        // or-ing it with the previous value.
+        uint64_t coveredBits = 8;
+        Value currentValue =
+            rewriter.create<LLVM::ZExtOp>(getLoc(), intType, getVal());
+        while (coveredBits < intType.getWidth()) {
+          Value shiftBy =
+              rewriter.create<LLVM::ConstantOp>(getLoc(), intType, coveredBits);
+          Value shifted =
+              rewriter.create<LLVM::ShlOp>(getLoc(), currentValue, shiftBy);
+          currentValue =
+              rewriter.create<LLVM::OrOp>(getLoc(), currentValue, shifted);
+          coveredBits *= 2;
+        }
+
+        return currentValue;
+      })
+      .Default([](Type) -> Value {
+        llvm_unreachable(
+            "getStored should not be called on memset to unsupported type");
+      });
+}
+
+bool LLVM::MemsetOp::canUsesBeRemoved(
+    const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
+  // TODO: Support non-integer types.
+  bool canConvertType =
+      TypeSwitch<Type, bool>(slot.elemType)
+          .Case([](IntegerType intType) {
+            return intType.getWidth() % 8 == 0 && intType.getWidth() > 0;
+          })
+          .Default([](Type) { return false; });
+  if (!canConvertType)
+    return false;
+
+  if (getIsVolatile())
+    return false;
+
+  return getStaticMemIntrLen(*this) == dataLayout.getTypeSize(slot.elemType);
+}
+
+DeletionKind LLVM::MemsetOp::removeBlockingUses(
+    const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    RewriterBase &rewriter, Value reachingDefinition,
+    const DataLayout &dataLayout) {
+  return DeletionKind::Delete;
+}
+
+LogicalResult LLVM::MemsetOp::ensureOnlySafeAccesses(
+    const MemorySlot &slot, SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+    const DataLayout &dataLayout) {
+  return success(definitelyWritesOnlyWithinSlot(*this, slot, dataLayout));
+}
+
+bool LLVM::MemsetOp::canRewire(const DestructurableMemorySlot &slot,
+                               SmallPtrSetImpl<Attribute> &usedIndices,
+                               SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+                               const DataLayout &dataLayout) {
+  if (&slot.elemType.getDialect() != getOperation()->getDialect())
+    return false;
+
+  if (getIsVolatile())
+    return false;
+
+  if (!cast<DestructurableTypeInterface>(slot.elemType).getSubelementIndexMap())
+    return false;
+
+  if (!areAllIndicesI32(slot))
+    return false;
+
+  return definitelyWritesOnlyWithinSlot(*this, slot, dataLayout);
+}
+
+DeletionKind LLVM::MemsetOp::rewire(const DestructurableMemorySlot &slot,
+                                    DenseMap<Attribute, MemorySlot> &subslots,
+                                    RewriterBase &rewriter,
+                                    const DataLayout &dataLayout) {
+  std::optional<DenseMap<Attribute, Type>> types =
+      cast<DestructurableTypeInterface>(slot.elemType).getSubelementIndexMap();
+
+  IntegerAttr memsetLenAttr;
+  bool successfulMatch =
+      matchPattern(getLen(), m_Constant<IntegerAttr>(&memsetLenAttr));
+  (void)successfulMatch;
+  assert(successfulMatch);
+
+  bool packed = false;
+  if (auto structType = dyn_cast<LLVM::LLVMStructType>(slot.elemType))
+    packed = structType.isPacked();
+
+  Type i32 = IntegerType::get(getContext(), 32);
+  uint64_t memsetLen = memsetLenAttr.getValue().getZExtValue();
+  uint64_t covered = 0;
+  for (size_t i = 0; i < types->size(); i++) {
+    // Create indices on the fly to get elements in the right order.
+    Attribute index = IntegerAttr::get(i32, i);
+    Type elemType = types->at(index);
+    uint64_t typeSize = dataLayout.getTypeSize(elemType);
+
+    if (!packed)
+      covered =
+          llvm::alignTo(covered, dataLayout.getTypeABIAlignment(elemType));
+
+    if (covered >= memsetLen)
+      break;
+
+    // If this subslot is used, apply a new memset to it.
+    // Otherwise, only compute its offset within the original memset.
+    if (subslots.contains(index)) {
+      uint64_t newMemsetSize = std::min(memsetLen - covered, typeSize);
+
+      Value newMemsetSizeValue =
+          rewriter
+              .create<LLVM::ConstantOp>(
+                  getLen().getLoc(),
+                  IntegerAttr::get(memsetLenAttr.getType(), newMemsetSize))
+              .getResult();
+
+      rewriter.create<LLVM::MemsetOp>(getLoc(), subslots.at(index).ptr,
+                                      getVal(), newMemsetSizeValue,
+                                      getIsVolatile());
+    }
+
+    covered += typeSize;
   }
 
-  rewriter.updateRootInPlace(*this, [&]() {
-    // Rewire the indices by popping off the second index.
-    // Start with a single zero, then add the indices beyond the second.
-    SmallVector<int32_t> newIndices(1);
-    newIndices.append(remainingIndices.begin(), remainingIndices.end());
-    setRawConstantIndices(newIndices);
+  return DeletionKind::Delete;
+}
 
-    // Rewire the pointed type.
-    setElemType(newSlot.elemType);
+//===----------------------------------------------------------------------===//
+// Interfaces for memcpy/memmove
+//===----------------------------------------------------------------------===//
 
-    // Rewire the pointer.
-    getBaseMutable().assign(newSlot.ptr);
-  });
+template <class MemcpyLike>
+static bool memcpyLoadsFrom(MemcpyLike op, const MemorySlot &slot) {
+  return op.getSrc() == slot.ptr;
+}
 
-  return DeletionKind::Keep;
+template <class MemcpyLike>
+static bool memcpyStoresTo(MemcpyLike op, const MemorySlot &slot) {
+  return op.getDst() == slot.ptr;
+}
+
+template <class MemcpyLike>
+static Value memcpyGetStored(MemcpyLike op, const MemorySlot &slot,
+                             RewriterBase &rewriter) {
+  return rewriter.create<LLVM::LoadOp>(op.getLoc(), slot.elemType, op.getSrc());
+}
+
+template <class MemcpyLike>
+static bool
+memcpyCanUsesBeRemoved(MemcpyLike op, const MemorySlot &slot,
+                       const SmallPtrSetImpl<OpOperand *> &blockingUses,
+                       SmallVectorImpl<OpOperand *> &newBlockingUses,
+                       const DataLayout &dataLayout) {
+  // If source and destination are the same, memcpy behavior is undefined and
+  // memmove is a no-op. Because there is no memory change happening here,
+  // simplifying such operations is left to canonicalization.
+  if (op.getDst() == op.getSrc())
+    return false;
+
+  if (op.getIsVolatile())
+    return false;
+
+  return getStaticMemIntrLen(op) == dataLayout.getTypeSize(slot.elemType);
+}
+
+template <class MemcpyLike>
+static DeletionKind
+memcpyRemoveBlockingUses(MemcpyLike op, const MemorySlot &slot,
+                         const SmallPtrSetImpl<OpOperand *> &blockingUses,
+                         RewriterBase &rewriter, Value reachingDefinition) {
+  if (op.loadsFrom(slot))
+    rewriter.create<LLVM::StoreOp>(op.getLoc(), reachingDefinition,
+                                   op.getDst());
+  return DeletionKind::Delete;
+}
+
+template <class MemcpyLike>
+static LogicalResult
+memcpyEnsureOnlySafeAccesses(MemcpyLike op, const MemorySlot &slot,
+                             SmallVectorImpl<MemorySlot> &mustBeSafelyUsed) {
+  DataLayout dataLayout = DataLayout::closest(op);
+  // While rewiring memcpy-like intrinsics only supports full copies, partial
+  // copies are still safe accesses so it is enough to only check for writes
+  // within bounds.
+  return success(definitelyWritesOnlyWithinSlot(op, slot, dataLayout));
+}
+
+template <class MemcpyLike>
+static bool memcpyCanRewire(MemcpyLike op, const DestructurableMemorySlot &slot,
+                            SmallPtrSetImpl<Attribute> &usedIndices,
+                            SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+                            const DataLayout &dataLayout) {
+  if (op.getIsVolatile())
+    return false;
+
+  if (!cast<DestructurableTypeInterface>(slot.elemType).getSubelementIndexMap())
+    return false;
+
+  if (!areAllIndicesI32(slot))
+    return false;
+
+  // Only full copies are supported.
+  if (getStaticMemIntrLen(op) != dataLayout.getTypeSize(slot.elemType))
+    return false;
+
+  if (op.getSrc() == slot.ptr)
+    for (Attribute index : llvm::make_first_range(slot.elementPtrs))
+      usedIndices.insert(index);
+
+  return true;
+}
+
+namespace {
+
+template <class MemcpyLike>
+void createMemcpyLikeToReplace(RewriterBase &rewriter, const DataLayout &layout,
+                               MemcpyLike toReplace, Value dst, Value src,
+                               Type toCpy, bool isVolatile) {
+  Value memcpySize = rewriter.create<LLVM::ConstantOp>(
+      toReplace.getLoc(), IntegerAttr::get(toReplace.getLen().getType(),
+                                           layout.getTypeSize(toCpy)));
+  rewriter.create<MemcpyLike>(toReplace.getLoc(), dst, src, memcpySize,
+                              isVolatile);
+}
+
+template <>
+void createMemcpyLikeToReplace(RewriterBase &rewriter, const DataLayout &layout,
+                               LLVM::MemcpyInlineOp toReplace, Value dst,
+                               Value src, Type toCpy, bool isVolatile) {
+  Type lenType = IntegerType::get(toReplace->getContext(),
+                                  toReplace.getLen().getBitWidth());
+  rewriter.create<LLVM::MemcpyInlineOp>(
+      toReplace.getLoc(), dst, src,
+      IntegerAttr::get(lenType, layout.getTypeSize(toCpy)), isVolatile);
+}
+
+} // namespace
+
+/// Rewires a memcpy-like operation. Only copies to or from the full slot are
+/// supported.
+template <class MemcpyLike>
+static DeletionKind
+memcpyRewire(MemcpyLike op, const DestructurableMemorySlot &slot,
+             DenseMap<Attribute, MemorySlot> &subslots, RewriterBase &rewriter,
+             const DataLayout &dataLayout) {
+  if (subslots.empty())
+    return DeletionKind::Delete;
+
+  assert((slot.ptr == op.getDst()) != (slot.ptr == op.getSrc()));
+  bool isDst = slot.ptr == op.getDst();
+
+#ifndef NDEBUG
+  size_t slotsTreated = 0;
+#endif
+
+  // It was previously checked that index types are consistent, so this type can
+  // be fetched now.
+  Type indexType = cast<IntegerAttr>(subslots.begin()->first).getType();
+  for (size_t i = 0, e = slot.elementPtrs.size(); i != e; i++) {
+    Attribute index = IntegerAttr::get(indexType, i);
+    if (!subslots.contains(index))
+      continue;
+    const MemorySlot &subslot = subslots.at(index);
+
+#ifndef NDEBUG
+    slotsTreated++;
+#endif
+
+    // First get a pointer to the equivalent of this subslot from the source
+    // pointer.
+    SmallVector<LLVM::GEPArg> gepIndices{
+        0, static_cast<int32_t>(
+               cast<IntegerAttr>(index).getValue().getZExtValue())};
+    Value subslotPtrInOther = rewriter.create<LLVM::GEPOp>(
+        op.getLoc(), LLVM::LLVMPointerType::get(op.getContext()), slot.elemType,
+        isDst ? op.getSrc() : op.getDst(), gepIndices);
+
+    // Then create a new memcpy out of this source pointer.
+    createMemcpyLikeToReplace(rewriter, dataLayout, op,
+                              isDst ? subslot.ptr : subslotPtrInOther,
+                              isDst ? subslotPtrInOther : subslot.ptr,
+                              subslot.elemType, op.getIsVolatile());
+  }
+
+  assert(subslots.size() == slotsTreated);
+
+  return DeletionKind::Delete;
+}
+
+bool LLVM::MemcpyOp::loadsFrom(const MemorySlot &slot) {
+  return memcpyLoadsFrom(*this, slot);
+}
+
+bool LLVM::MemcpyOp::storesTo(const MemorySlot &slot) {
+  return memcpyStoresTo(*this, slot);
+}
+
+Value LLVM::MemcpyOp::getStored(const MemorySlot &slot, RewriterBase &rewriter,
+                                const DataLayout &dataLayout) {
+  return memcpyGetStored(*this, slot, rewriter);
+}
+
+bool LLVM::MemcpyOp::canUsesBeRemoved(
+    const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
+  return memcpyCanUsesBeRemoved(*this, slot, blockingUses, newBlockingUses,
+                                dataLayout);
+}
+
+DeletionKind LLVM::MemcpyOp::removeBlockingUses(
+    const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    RewriterBase &rewriter, Value reachingDefinition,
+    const DataLayout &dataLayout) {
+  return memcpyRemoveBlockingUses(*this, slot, blockingUses, rewriter,
+                                  reachingDefinition);
+}
+
+LogicalResult LLVM::MemcpyOp::ensureOnlySafeAccesses(
+    const MemorySlot &slot, SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+    const DataLayout &dataLayout) {
+  return memcpyEnsureOnlySafeAccesses(*this, slot, mustBeSafelyUsed);
+}
+
+bool LLVM::MemcpyOp::canRewire(const DestructurableMemorySlot &slot,
+                               SmallPtrSetImpl<Attribute> &usedIndices,
+                               SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+                               const DataLayout &dataLayout) {
+  return memcpyCanRewire(*this, slot, usedIndices, mustBeSafelyUsed,
+                         dataLayout);
+}
+
+DeletionKind LLVM::MemcpyOp::rewire(const DestructurableMemorySlot &slot,
+                                    DenseMap<Attribute, MemorySlot> &subslots,
+                                    RewriterBase &rewriter,
+                                    const DataLayout &dataLayout) {
+  return memcpyRewire(*this, slot, subslots, rewriter, dataLayout);
+}
+
+bool LLVM::MemcpyInlineOp::loadsFrom(const MemorySlot &slot) {
+  return memcpyLoadsFrom(*this, slot);
+}
+
+bool LLVM::MemcpyInlineOp::storesTo(const MemorySlot &slot) {
+  return memcpyStoresTo(*this, slot);
+}
+
+Value LLVM::MemcpyInlineOp::getStored(const MemorySlot &slot,
+                                      RewriterBase &rewriter,
+                                      const DataLayout &dataLayout) {
+  return memcpyGetStored(*this, slot, rewriter);
+}
+
+bool LLVM::MemcpyInlineOp::canUsesBeRemoved(
+    const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
+  return memcpyCanUsesBeRemoved(*this, slot, blockingUses, newBlockingUses,
+                                dataLayout);
+}
+
+DeletionKind LLVM::MemcpyInlineOp::removeBlockingUses(
+    const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    RewriterBase &rewriter, Value reachingDefinition,
+    const DataLayout &dataLayout) {
+  return memcpyRemoveBlockingUses(*this, slot, blockingUses, rewriter,
+                                  reachingDefinition);
+}
+
+LogicalResult LLVM::MemcpyInlineOp::ensureOnlySafeAccesses(
+    const MemorySlot &slot, SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+    const DataLayout &dataLayout) {
+  return memcpyEnsureOnlySafeAccesses(*this, slot, mustBeSafelyUsed);
+}
+
+bool LLVM::MemcpyInlineOp::canRewire(
+    const DestructurableMemorySlot &slot,
+    SmallPtrSetImpl<Attribute> &usedIndices,
+    SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+    const DataLayout &dataLayout) {
+  return memcpyCanRewire(*this, slot, usedIndices, mustBeSafelyUsed,
+                         dataLayout);
+}
+
+DeletionKind
+LLVM::MemcpyInlineOp::rewire(const DestructurableMemorySlot &slot,
+                             DenseMap<Attribute, MemorySlot> &subslots,
+                             RewriterBase &rewriter,
+                             const DataLayout &dataLayout) {
+  return memcpyRewire(*this, slot, subslots, rewriter, dataLayout);
+}
+
+bool LLVM::MemmoveOp::loadsFrom(const MemorySlot &slot) {
+  return memcpyLoadsFrom(*this, slot);
+}
+
+bool LLVM::MemmoveOp::storesTo(const MemorySlot &slot) {
+  return memcpyStoresTo(*this, slot);
+}
+
+Value LLVM::MemmoveOp::getStored(const MemorySlot &slot, RewriterBase &rewriter,
+                                 const DataLayout &dataLayout) {
+  return memcpyGetStored(*this, slot, rewriter);
+}
+
+bool LLVM::MemmoveOp::canUsesBeRemoved(
+    const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    SmallVectorImpl<OpOperand *> &newBlockingUses,
+    const DataLayout &dataLayout) {
+  return memcpyCanUsesBeRemoved(*this, slot, blockingUses, newBlockingUses,
+                                dataLayout);
+}
+
+DeletionKind LLVM::MemmoveOp::removeBlockingUses(
+    const MemorySlot &slot, const SmallPtrSetImpl<OpOperand *> &blockingUses,
+    RewriterBase &rewriter, Value reachingDefinition,
+    const DataLayout &dataLayout) {
+  return memcpyRemoveBlockingUses(*this, slot, blockingUses, rewriter,
+                                  reachingDefinition);
+}
+
+LogicalResult LLVM::MemmoveOp::ensureOnlySafeAccesses(
+    const MemorySlot &slot, SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+    const DataLayout &dataLayout) {
+  return memcpyEnsureOnlySafeAccesses(*this, slot, mustBeSafelyUsed);
+}
+
+bool LLVM::MemmoveOp::canRewire(const DestructurableMemorySlot &slot,
+                                SmallPtrSetImpl<Attribute> &usedIndices,
+                                SmallVectorImpl<MemorySlot> &mustBeSafelyUsed,
+                                const DataLayout &dataLayout) {
+  return memcpyCanRewire(*this, slot, usedIndices, mustBeSafelyUsed,
+                         dataLayout);
+}
+
+DeletionKind LLVM::MemmoveOp::rewire(const DestructurableMemorySlot &slot,
+                                     DenseMap<Attribute, MemorySlot> &subslots,
+                                     RewriterBase &rewriter,
+                                     const DataLayout &dataLayout) {
+  return memcpyRewire(*this, slot, subslots, rewriter, dataLayout);
 }
 
 //===----------------------------------------------------------------------===//

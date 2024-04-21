@@ -32,13 +32,13 @@ class NamespaceBreakpointTestCase(TestBase):
         )
         for bp_loc in bp:
             name = bp_loc.GetAddress().GetFunction().GetName()
-            self.assertTrue(
-                name in names,
+            self.assertIn(
+                name,
+                names,
                 "make sure breakpoint locations are correct for 'func' with eFunctionNameTypeAuto",
             )
 
     @expectedFailureAll(bugnumber="llvm.org/pr28548", compiler="gcc")
-    @expectedFailureAll(oslist=["windows"])
     def test_breakpoints_func_full(self):
         """Test that we can set breakpoints correctly by fullname to find all functions whose fully qualified name is "func"
         (no namespaces)."""
@@ -62,8 +62,9 @@ class NamespaceBreakpointTestCase(TestBase):
         )
         for bp_loc in bp:
             name = bp_loc.GetAddress().GetFunction().GetName()
-            self.assertTrue(
-                name in names,
+            self.assertIn(
+                name,
+                names,
                 "make sure breakpoint locations are correct for 'func' with eFunctionNameTypeFull",
             )
 
@@ -89,8 +90,9 @@ class NamespaceBreakpointTestCase(TestBase):
         )
         for bp_loc in bp:
             name = bp_loc.GetAddress().GetFunction().GetName()
-            self.assertTrue(
-                name in names,
+            self.assertIn(
+                name,
+                names,
                 "make sure breakpoint locations are correct for 'A::func' with eFunctionNameTypeFull",
             )
 

@@ -6,12 +6,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_LIBC_UTILS_TESTUTILS_ROUNDINGMODEUTILS_H
-#define LLVM_LIBC_UTILS_TESTUTILS_ROUNDINGMODEUTILS_H
+#ifndef LLVM_LIBC_TEST_UNITTEST_ROUNDINGMODEUTILS_H
+#define LLVM_LIBC_TEST_UNITTEST_ROUNDINGMODEUTILS_H
 
 #include <stdint.h>
 
-namespace __llvm_libc {
+namespace LIBC_NAMESPACE {
 namespace fputil {
 namespace testing {
 
@@ -23,6 +23,7 @@ struct ForceRoundingMode {
 
   int old_rounding_mode;
   int rounding_mode;
+  bool success;
 };
 
 template <RoundingMode R> struct ForceRoundingModeTest : ForceRoundingMode {
@@ -31,6 +32,6 @@ template <RoundingMode R> struct ForceRoundingModeTest : ForceRoundingMode {
 
 } // namespace testing
 } // namespace fputil
-} // namespace __llvm_libc
+} // namespace LIBC_NAMESPACE
 
-#endif // LLVM_LIBC_UTILS_TESTUTILS_ROUNDINGMODEUTILS_H
+#endif // LLVM_LIBC_TEST_UNITTEST_ROUNDINGMODEUTILS_H

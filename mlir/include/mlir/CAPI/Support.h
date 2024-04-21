@@ -21,6 +21,10 @@
 #include "mlir/Support/TypeID.h"
 #include "llvm/ADT/StringRef.h"
 
+namespace llvm {
+class ThreadPoolInterface;
+} // namespace llvm
+
 /// Converts a StringRef into its MLIR C API equivalent.
 inline MlirStringRef wrap(llvm::StringRef ref) {
   return mlirStringRefCreate(ref.data(), ref.size());
@@ -41,28 +45,8 @@ inline mlir::LogicalResult unwrap(MlirLogicalResult res) {
   return mlir::success(mlirLogicalResultIsSuccess(res));
 }
 
+DEFINE_C_API_PTR_METHODS(MlirLlvmThreadPool, llvm::ThreadPoolInterface)
 DEFINE_C_API_METHODS(MlirTypeID, mlir::TypeID)
 DEFINE_C_API_PTR_METHODS(MlirTypeIDAllocator, mlir::TypeIDAllocator)
-
-namespace llvm {
-
-template <>
-struct DenseMapInfo<MlirTypeID> {
-  static inline MlirTypeID getEmptyKey() {
-    auto *pointer = llvm::DenseMapInfo<void *>::getEmptyKey();
-    return mlirTypeIDCreate(pointer);
-  }
-  static inline MlirTypeID getTombstoneKey() {
-    auto *pointer = llvm::DenseMapInfo<void *>::getTombstoneKey();
-    return mlirTypeIDCreate(pointer);
-  }
-  static inline unsigned getHashValue(const MlirTypeID &val) {
-    return mlirTypeIDHashValue(val);
-  }
-  static inline bool isEqual(const MlirTypeID &lhs, const MlirTypeID &rhs) {
-    return mlirTypeIDEqual(lhs, rhs);
-  }
-};
-} // namespace llvm
 
 #endif // MLIR_CAPI_SUPPORT_H

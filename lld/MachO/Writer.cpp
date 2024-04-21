@@ -66,7 +66,7 @@ public:
 
   template <class LP> void run();
 
-  ThreadPool threadPool;
+  DefaultThreadPool threadPool;
   std::unique_ptr<FileOutputBuffer> &buffer;
   uint64_t addr = 0;
   uint64_t fileOff = 0;
@@ -495,7 +495,7 @@ public:
 
     c->ntools = ntools;
     auto *t = reinterpret_cast<build_tool_version *>(&c[1]);
-    t->tool = TOOL_LD;
+    t->tool = TOOL_LLD;
     t->version = encodeVersion(VersionTuple(
         LLVM_VERSION_MAJOR, LLVM_VERSION_MINOR, LLVM_VERSION_PATCH));
   }
@@ -674,11 +674,21 @@ void Writer::scanRelocations() {
 
     for (auto it = isec->relocs.begin(); it != isec->relocs.end(); ++it) {
       lld::macho::Reloc &r = *it;
+
+      // Canonicalize the referent so that later accesses in Writer won't
+      // have to worry about it.
+      if (auto *referentIsec = r.referent.dyn_cast<InputSection *>())
+        r.referent = referentIsec->canonical();
+
       if (target->hasAttr(r.type, RelocAttrBits::SUBTRAHEND)) {
         // Skip over the following UNSIGNED relocation -- it's just there as the
         // minuend, and doesn't have the usual UNSIGNED semantics. We don't want
         // to emit rebase opcodes for it.
-        it++;
+        ++it;
+        // Canonicalize the referent so that later accesses in Writer won't
+        // have to worry about it.
+        if (auto *referentIsec = it->referent.dyn_cast<InputSection *>())
+          it->referent = referentIsec->canonical();
         continue;
       }
       if (auto *sym = r.referent.dyn_cast<Symbol *>()) {
@@ -688,11 +698,6 @@ void Writer::scanRelocations() {
         if (!isa<Undefined>(sym) && validateSymbolRelocation(sym, isec, r))
           prepareSymbolRelocation(sym, isec, r);
       } else {
-        // Canonicalize the referent so that later accesses in Writer won't
-        // have to worry about it. Perhaps we should do this for Defined::isec
-        // too...
-        auto *referentIsec = r.referent.get<InputSection *>();
-        r.referent = referentIsec->canonical();
         if (!r.pcrel) {
           if (config->emitChainedFixups)
             in.chainedFixups->addRebase(isec, r.offset);
@@ -715,14 +720,14 @@ static void addNonWeakDefinition(const Defined *defined) {
 
 void Writer::scanSymbols() {
   TimeTraceScope timeScope("Scan symbols");
+  ObjCSelRefsHelper::initialize();
   for (Symbol *sym : symtab->getSymbols()) {
     if (auto *defined = dyn_cast<Defined>(sym)) {
       if (!defined->isLive())
         continue;
-      defined->canonicalize();
       if (defined->overridesWeakDef)
         addNonWeakDefinition(defined);
-      if (!defined->isAbsolute() && isCodeSection(defined->isec))
+      if (!defined->isAbsolute() && isCodeSection(defined->isec()))
         in.unwindInfo->addSymbol(defined);
     } else if (const auto *dysym = dyn_cast<DylibSymbol>(sym)) {
       // This branch intentionally doesn't check isLive().
@@ -731,8 +736,16 @@ void Writer::scanSymbols() {
       dysym->getFile()->refState =
           std::max(dysym->getFile()->refState, dysym->getRefState());
     } else if (isa<Undefined>(sym)) {
-      if (sym->getName().startswith(ObjCStubsSection::symbolPrefix))
+      if (ObjCStubsSection::isObjCStubSymbol(sym)) {
+        // When -dead_strip is enabled, we don't want to emit any dead stubs.
+        // Although this stub symbol is yet undefined, addSym() was called
+        // during MarkLive.
+        if (config->deadStrip) {
+          if (!sym->isLive())
+            continue;
+        }
         in.objcStubs->addEntry(sym);
+      }
     }
   }
 
@@ -742,9 +755,8 @@ void Writer::scanSymbols() {
         if (auto *defined = dyn_cast_or_null<Defined>(sym)) {
           if (!defined->isLive())
             continue;
-          defined->canonicalize();
           if (!defined->isExternal() && !defined->isAbsolute() &&
-              isCodeSection(defined->isec))
+              isCodeSection(defined->isec()))
             in.unwindInfo->addSymbol(defined);
         }
       }
@@ -808,8 +820,10 @@ template <class LP> void Writer::createLoadCommands() {
     llvm_unreachable("unhandled output file type");
   }
 
-  uuidCommand = make<LCUuid>();
-  in.header->addLoadCommand(uuidCommand);
+  if (config->generateUuid) {
+    uuidCommand = make<LCUuid>();
+    in.header->addLoadCommand(uuidCommand);
+  }
 
   if (useLCBuildVersion(config->platformInfo))
     in.header->addLoadCommand(make<LCBuildVersion>(config->platformInfo));
@@ -978,8 +992,6 @@ template <class LP> void Writer::createOutputSections() {
     dataInCodeSection = make<DataInCodeSection>();
   if (config->emitFunctionStarts)
     functionStartsSection = make<FunctionStartsSection>();
-  if (config->emitBitcodeBundle)
-    make<BitcodeBundleSection>();
 
   switch (config->outputType) {
   case MH_EXECUTE:
@@ -1177,24 +1189,21 @@ void Writer::writeUuid() {
   TimeTraceScope timeScope("Computing UUID");
 
   ArrayRef<uint8_t> data{buffer->getBufferStart(), buffer->getBufferEnd()};
-  unsigned chunkCount = parallel::strategy.compute_thread_count() * 10;
-  // Round-up integer division
-  size_t chunkSize = (data.size() + chunkCount - 1) / chunkCount;
-  std::vector<ArrayRef<uint8_t>> chunks = split(data, chunkSize);
+  std::vector<ArrayRef<uint8_t>> chunks = split(data, 1024 * 1024);
   // Leave one slot for filename
   std::vector<uint64_t> hashes(chunks.size() + 1);
   SmallVector<std::shared_future<void>> threadFutures;
   threadFutures.reserve(chunks.size());
   for (size_t i = 0; i < chunks.size(); ++i)
     threadFutures.emplace_back(threadPool.async(
-        [&](size_t j) { hashes[j] = xxHash64(chunks[j]); }, i));
+        [&](size_t j) { hashes[j] = xxh3_64bits(chunks[j]); }, i));
   for (std::shared_future<void> &future : threadFutures)
     future.wait();
   // Append the output filename so that identical binaries with different names
   // don't get the same UUID.
-  hashes[chunks.size()] = xxHash64(sys::path::filename(config->finalOutput));
-  uint64_t digest = xxHash64({reinterpret_cast<uint8_t *>(hashes.data()),
-                              hashes.size() * sizeof(uint64_t)});
+  hashes[chunks.size()] = xxh3_64bits(sys::path::filename(config->finalOutput));
+  uint64_t digest = xxh3_64bits({reinterpret_cast<uint8_t *>(hashes.data()),
+                                 hashes.size() * sizeof(uint64_t)});
   uuidCommand->writeUuid(digest);
 }
 
@@ -1261,7 +1270,8 @@ void Writer::writeOutputFile() {
   writeSections();
   applyOptimizationHints();
   buildFixupChains();
-  writeUuid();
+  if (config->generateUuid)
+    writeUuid();
   writeCodeSignature();
 
   if (auto e = buffer->commit())
@@ -1280,6 +1290,8 @@ template <class LP> void Writer::run() {
   scanSymbols();
   if (in.objcStubs->isNeeded())
     in.objcStubs->setUp();
+  if (in.objcMethList->isNeeded())
+    in.objcMethList->setUp();
   scanRelocations();
   if (in.initOffsets->isNeeded())
     in.initOffsets->setUp();
@@ -1351,6 +1363,7 @@ void macho::createSyntheticSections() {
   in.unwindInfo = makeUnwindInfoSection();
   in.objCImageInfo = make<ObjCImageInfoSection>();
   in.initOffsets = make<InitOffsetsSection>();
+  in.objcMethList = make<ObjCMethListSection>();
 
   // This section contains space for just a single word, and will be used by
   // dyld to cache an address to the image loader it uses.
@@ -1360,9 +1373,7 @@ void macho::createSyntheticSections() {
       segment_names::data, section_names::data, S_REGULAR,
       ArrayRef<uint8_t>{arr, target->wordSize},
       /*align=*/target->wordSize);
-  // References from dyld are not visible to us, so ensure this section is
-  // always treated as live.
-  in.imageLoaderCache->live = true;
+  assert(in.imageLoaderCache->live);
 }
 
 OutputSection *macho::firstTLVDataSection = nullptr;

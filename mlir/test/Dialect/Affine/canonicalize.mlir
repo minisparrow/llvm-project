@@ -582,14 +582,23 @@ func.func @empty_loops_not_folded_3() -> (index, index) {
 
 // -----
 
+// CHECK-LABEL:  func @zero_iter_loop_not_folded
+func.func @zero_iter_loop_not_folded() {
+  %A = memref.alloc() : memref<4xf32>
+  affine.for %i = 0 to 0 {
+      %load = affine.load %A[%i] : memref<4xf32>
+      affine.store %load, %A[%i] : memref<4xf32>
+  }
+  // CHECK:   affine.for {{.*}} = 0 to 0 {
+  return
+}
+
+// -----
+
 // CHECK-LABEL:  func @fold_zero_iter_loops
 // CHECK-SAME: %[[ARG:.*]]: index
 func.func @fold_zero_iter_loops(%in : index) -> index {
   %c1 = arith.constant 1 : index
-  affine.for %i = 0 to 0 {
-    affine.for %j = 0 to -1 {
-    }
-  }
   %res = affine.for %i = 0 to 0 iter_args(%loop_arg = %in) -> index {
     %yield = arith.addi %loop_arg, %c1 : index
     affine.yield %yield : index
@@ -1429,4 +1438,31 @@ func.func @max.oneval(%arg0: index) -> index {
   %max = affine.max affine_map<()[s0] -> (s0)> ()[%arg0]
   // CHECK: return %arg0 : index
   return %max: index
+}
+
+// -----
+
+// CHECK-LABEL: func @mod_of_mod(
+//       CHECK:   %[[c0:.*]] = arith.constant 0
+//       CHECK:   return %[[c0]], %[[c0]]
+func.func @mod_of_mod(%lb: index, %ub: index, %step: index) -> (index, index) {
+  // Simplify: (ub - ub % step) % step == 0
+  %0 = affine.apply affine_map<()[s0, s1] -> ((s0 - (s0 mod s1)) mod s1)> ()[%ub, %step]
+  // Simplify: (ub - (ub - lb) % step - lb) % step == 0
+  %1 = affine.apply affine_map<()[s0, s1, s2] -> ((s0 - ((s0 - s2) mod s1) - s2) mod s1)> ()[%ub, %step, %lb]
+  return %0, %1 : index, index
+}
+
+// -----
+
+// CHECK-LABEL:  func.func @prefetch_canonicalize
+// CHECK-SAME:   ([[PARAM_0_:%.+]]: memref<512xf32>) {
+func.func @prefetch_canonicalize(%arg0: memref<512xf32>) -> () {
+  // CHECK: affine.for [[I_0_:%.+]] = 0 to 8 {
+  affine.for %arg3 = 0 to 8  {
+    %1 = affine.apply affine_map<()[s0] -> (s0 * 64)>()[%arg3]
+    // CHECK: affine.prefetch [[PARAM_0_]][symbol([[I_0_]]) * 64], read, locality<3>, data : memref<512xf32>
+    affine.prefetch %arg0[%1], read, locality<3>, data : memref<512xf32>
+  }
+  return
 }

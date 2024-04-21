@@ -7,8 +7,7 @@
 
 // UNSUPPORTED: c++03, c++11, c++14, c++17, c++20
 
-// TODO FMT Fix this test using GCC, it currently times out.
-// UNSUPPORTED: gcc-12
+// UNSUPPORTED: GCC-ALWAYS_INLINE-FIXME
 
 // <format>
 
@@ -25,9 +24,9 @@
 #include <cassert>
 #include <concepts>
 #include <format>
+#include <memory>
 #include <set>
 
-#include "test_format_context.h"
 #include "test_macros.h"
 #include "make_string.h"
 
@@ -41,7 +40,8 @@ constexpr void test_parse(StringViewT fmt, std::size_t offset) {
   static_assert(std::semiregular<decltype(formatter)>);
 
   std::same_as<typename StringViewT::iterator> auto it = formatter.parse(parse_ctx);
-  assert(it == fmt.end() - offset);
+  // std::to_address works around LWG3989 and MSVC STL's iterator debugging mechanism.
+  assert(std::to_address(it) == std::to_address(fmt.end()) - offset);
 }
 
 template <class CharT>

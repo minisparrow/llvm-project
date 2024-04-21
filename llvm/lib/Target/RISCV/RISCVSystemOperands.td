@@ -133,6 +133,11 @@ let DeprecatedName = "sptbr" in
 def : SysReg<"satp", 0x180>;
 
 //===----------------------------------------------------------------------===//
+// Quality-of-Service(QoS) Identifiers (Ssqosid)
+//===----------------------------------------------------------------------===//
+def : SysReg<"srmcfg", 0x181>;
+
+//===----------------------------------------------------------------------===//
 // Debug/Trace Registers
 //===----------------------------------------------------------------------===//
 
@@ -331,11 +336,16 @@ def : SysReg<"dscratch1", 0x7B3>;
 //===----------------------------------------------------------------------===//
 def : SysReg<"vstart", 0x008>;
 def : SysReg<"vxsat", 0x009>;
-def : SysReg<"vxrm", 0x00A>;
+def SysRegVXRM : SysReg<"vxrm", 0x00A>;
 def : SysReg<"vcsr", 0x00F>;
 def SysRegVL : SysReg<"vl", 0xC20>;
 def : SysReg<"vtype", 0xC21>;
 def SysRegVLENB: SysReg<"vlenb", 0xC22>;
+
+//===----------------------------------------------------------------------===//
+// Shadow Stack CSR
+//===----------------------------------------------------------------------===//
+def : SysReg<"ssp", 0x011>;
 
 //===----------------------------------------------------------------------===//
 // State Enable Extension (Smstateen)
@@ -408,7 +418,16 @@ def : SysReg<"vsieh", 0x214>;
 def : SysReg<"vsiph", 0x254>;
 } // isRV32Only
 
+//===-----------------------------------------------
 // Jump Vector Table CSR
 //===-----------------------------------------------
 
 def : SysReg<"jvt", 0x017>;
+
+//===-----------------------------------------------
+// Resumable Non-Maskable Interrupts(Smrnmi) CSRs
+//===-----------------------------------------------
+def : SysReg<"mnscratch", 0x740>;
+def : SysReg<"mnepc", 0x741>;
+def : SysReg<"mncause", 0x742>;
+def : SysReg<"mnstatus", 0x744>;

@@ -85,6 +85,9 @@ class TensorExpression:
     def __sub__(self, rhs) -> "TensorExpression":
         return BinaryFn.sub(self, rhs)
 
+    def __truediv__(self, rhs) -> "TensorExpression":
+        return BinaryFn.div(self, rhs)
+
     def __hash__(self):
         return hash(id(self))
 
@@ -315,12 +318,14 @@ class BinaryFn:
 
     Examples:
     - max -> `arith.MaxSIOp`
-    - max_unsinged -> `arith.MaxUIOp`
+    - max_unsigned -> `arith.MaxUIOp`
     """
 
     add = BinaryFnType("add")
     sub = BinaryFnType("sub")
     mul = BinaryFnType("mul")
+    div = BinaryFnType("div")
+    div_unsigned = BinaryFnType("div_unsigned")
     max_signed = BinaryFnType("max_signed")
     min_signed = BinaryFnType("min_signed")
     max_unsigned = BinaryFnType("max_unsigned")

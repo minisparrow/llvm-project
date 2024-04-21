@@ -28,6 +28,7 @@
 #include <mutex>
 #include <optional>
 #include <stack>
+#include <unordered_map>
 
 namespace lldb_private {
 class CommandInterpreter;
@@ -641,6 +642,12 @@ public:
   Status PreprocessCommand(std::string &command);
   Status PreprocessToken(std::string &token);
 
+  void IncreaseCommandUsage(const CommandObject &cmd_obj) {
+    ++m_command_usages[cmd_obj.GetCommandName()];
+  }
+
+  llvm::json::Value GetStatistics();
+
 protected:
   friend class Debugger;
 
@@ -652,10 +659,11 @@ protected:
   void IOHandlerInputComplete(IOHandler &io_handler,
                               std::string &line) override;
 
-  ConstString IOHandlerGetControlSequence(char ch) override {
+  llvm::StringRef IOHandlerGetControlSequence(char ch) override {
+    static constexpr llvm::StringLiteral control_sequence("quit\n");
     if (ch == 'd')
-      return ConstString("quit\n");
-    return ConstString();
+      return control_sequence;
+    return {};
   }
 
   void GetProcessOutput();
@@ -752,6 +760,10 @@ private:
   std::optional<int> m_quit_exit_code;
   // If the driver is accepts custom exit codes for the 'quit' command.
   bool m_allow_exit_code = false;
+
+  /// Command usage statistics.
+  typedef llvm::StringMap<uint64_t> CommandUsageMap;
+  CommandUsageMap m_command_usages;
 
   StreamString m_transcript_stream;
 };

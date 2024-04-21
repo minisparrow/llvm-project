@@ -57,18 +57,6 @@ unsigned MCRegisterInfo::getSubRegIndex(MCRegister Reg,
   return 0;
 }
 
-unsigned MCRegisterInfo::getSubRegIdxSize(unsigned Idx) const {
-  assert(Idx && Idx < getNumSubRegIndices() &&
-         "This is not a subregister index");
-  return SubRegIdxRanges[Idx].Size;
-}
-
-unsigned MCRegisterInfo::getSubRegIdxOffset(unsigned Idx) const {
-  assert(Idx && Idx < getNumSubRegIndices() &&
-         "This is not a subregister index");
-  return SubRegIdxRanges[Idx].Offset;
-}
-
 int MCRegisterInfo::getDwarfRegNum(MCRegister RegNum, bool isEH) const {
   const DwarfLLVMRegPair *M = isEH ? EHL2DwarfRegs : L2DwarfRegs;
   unsigned Size = isEH ? EHL2DwarfRegsSize : L2DwarfRegsSize;
@@ -134,11 +122,13 @@ int MCRegisterInfo::getCodeViewRegNum(MCRegister RegNum) const {
 
 bool MCRegisterInfo::regsOverlap(MCRegister RegA, MCRegister RegB) const {
   // Regunits are numerically ordered. Find a common unit.
-  MCRegUnitIterator RUA(RegA, this);
-  MCRegUnitIterator RUB(RegB, this);
+  auto RangeA = regunits(RegA);
+  MCRegUnitIterator IA = RangeA.begin(), EA = RangeA.end();
+  auto RangeB = regunits(RegB);
+  MCRegUnitIterator IB = RangeB.begin(), EB = RangeB.end();
   do {
-    if (*RUA == *RUB)
+    if (*IA == *IB)
       return true;
-  } while (*RUA < *RUB ? (++RUA).isValid() : (++RUB).isValid());
+  } while (*IA < *IB ? ++IA != EA : ++IB != EB);
   return false;
 }

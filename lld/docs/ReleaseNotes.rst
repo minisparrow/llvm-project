@@ -26,8 +26,15 @@ Non-comprehensive list of changes in this release
 ELF Improvements
 ----------------
 
-* ``--remap-inputs=`` and ``--remap-inputs-file=`` are added to remap input files.
-  (`D148859 <https://reviews.llvm.org/D148859>`_)
+* ``--compress-sections <section-glib>=[none|zlib|zstd]`` is added to compress
+  matched output sections without the ``SHF_ALLOC`` flag.
+  (`#84855 <https://github.com/llvm/llvm-project/pull/84855>`_)
+* ``GNU_PROPERTY_AARCH64_FEATURE_PAUTH`` notes, ``R_AARCH64_AUTH_ABS64`` and
+  ``R_AARCH64_AUTH_RELATIVE`` relocations are now supported.
+  (`#72714 <https://github.com/llvm/llvm-project/pull/72714>`_)
+* ``--debug-names`` is added to create a merged ``.debug_names`` index
+  from input ``.debug_names`` sections. Type units are not handled yet.
+  (`#86508 <https://github.com/llvm/llvm-project/pull/86508>`_)
 
 Breaking changes
 ----------------
@@ -46,7 +53,3 @@ WebAssembly Improvements
 
 Fixes
 #####
-
-* Arm exception index tables (.ARM.exidx sections) are now output
-  correctly when they are at a non zero offset within their output
-  section. (`D148033 <https://reviews.llvm.org/D148033>`_)

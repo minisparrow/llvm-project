@@ -9,7 +9,6 @@ add_libc_test(
   DEPENDS
     libc.src.errno.errno
     libc.src.stdlib.atof
-    libc.test.errno_setter_matcher
 )
 
 add_header_library(
@@ -18,6 +17,7 @@ add_header_library(
     AtoiTest.h
   DEPENDS
     libc.src.errno.errno
+    libc.src.__support.CPP.limits
     libc.src.__support.CPP.type_traits
 )
 
@@ -89,6 +89,30 @@ add_header_library(
 )
 
 add_libc_test(
+  strtoint32_test
+  SUITE
+    libc-stdlib-tests
+  SRCS
+    strtoint32_test.cpp
+  DEPENDS
+    libc.src.__support.str_to_integer
+    libc.src.errno.errno
+    .strtol_test_support
+)
+
+add_libc_test(
+  strtoint64_test
+  SUITE
+    libc-stdlib-tests
+  SRCS
+    strtoint64_test.cpp
+  DEPENDS
+    libc.src.__support.str_to_integer
+    libc.src.errno.errno
+    .strtol_test_support
+)
+
+add_libc_test(
   strtol_test
   SUITE
     libc-stdlib-tests
@@ -142,6 +166,48 @@ add_libc_test(
   DEPENDS
     libc.src.stdlib.strtoull
     .strtol_test_support
+)
+
+add_header_library(
+  strfrom_test_support
+  HDRS
+  StrfromTest.h
+  DEPENDS
+  libc.src.__support.CPP.type_traits
+  libc.src.__support.FPUtil.fp_bits
+)
+
+add_libc_test(
+  strfromf_test
+  SUITE
+    libc-stdlib-tests
+  SRCS
+    strfromf_test.cpp
+  DEPENDS
+    .strfrom_test_support
+    libc.src.stdlib.strfromf
+)
+
+add_libc_test(
+  strfromd_test
+  SUITE
+    libc-stdlib-tests
+  SRCS
+    strfromd_test.cpp
+  DEPENDS
+    .strfrom_test_support
+    libc.src.stdlib.strfromd
+)
+
+add_libc_test(
+  strfroml_test
+  SUITE
+    libc-stdlib-tests
+  SRCS
+    strfroml_test.cpp
+  DEPENDS
+    .strfrom_test_support
+    libc.src.stdlib.strfroml
 )
 
 add_libc_test(
@@ -236,6 +302,17 @@ add_libc_test(
 )
 
 add_libc_test(
+  qsort_r_test
+  SUITE
+    libc-stdlib-tests
+  SRCS
+    qsort_r_test.cpp
+  DEPENDS
+    libc.include.stdlib
+    libc.src.stdlib.qsort_r
+)
+
+add_libc_test(
   rand_test
   SUITE
     libc-stdlib-tests
@@ -296,4 +373,19 @@ if(LLVM_LIBC_FULL_BUILD)
       libc.src.signal.raise
   )
 
+  # Only the GPU has an in-tree 'malloc' implementation.
+  if(LIBC_TARGET_OS_IS_GPU)
+    add_libc_test(
+      malloc_test
+      HERMETIC_TEST_ONLY
+      SUITE
+        libc-stdlib-tests
+      SRCS
+        malloc_test.cpp
+      DEPENDS
+        libc.include.stdlib
+        libc.src.stdlib.malloc
+        libc.src.stdlib.free
+    )
+  endif()
 endif()

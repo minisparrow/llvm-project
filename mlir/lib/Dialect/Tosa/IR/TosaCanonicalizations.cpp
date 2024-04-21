@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Tosa/Utils/ConversionUtils.h"
 #include "mlir/Dialect/Tosa/Utils/QuantUtils.h"
 #include "mlir/Dialect/Tosa/Utils/ShapeUtils.h"
+#include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/Matchers.h"
@@ -25,6 +26,7 @@
 #include "mlir/Transforms/InliningUtils.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -62,67 +64,11 @@ void ConcatOp::getCanonicalizationPatterns(RewritePatternSet &results,
   results.add<ConcatOptimization>(context);
 }
 
-struct ReshapeReshapeOptimization : public OpRewritePattern<tosa::ReshapeOp> {
-  using OpRewritePattern<tosa::ReshapeOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(tosa::ReshapeOp op,
-                                PatternRewriter &rewriter) const override {
-    Value input = op.getInput1();
-    Operation *definingOp = input.getDefiningOp();
-    if (!definingOp)
-      return failure();
-
-    if (tosa::ReshapeOp reshapeOp = dyn_cast<tosa::ReshapeOp>(definingOp)) {
-      rewriter.replaceOpWithNewOp<tosa::ReshapeOp>(
-          op, op.getType(), reshapeOp.getInput1(), op.getNewShape());
-      return success();
-    }
-
-    return failure();
-  }
-};
-
-struct ReshapeConstOptimization : public OpRewritePattern<tosa::ReshapeOp> {
-  using OpRewritePattern<tosa::ReshapeOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(tosa::ReshapeOp op,
-                                PatternRewriter &rewriter) const override {
-    Value input = op.getInput1();
-    ShapedType inputTy = llvm::cast<ShapedType>(input.getType());
-    ShapedType resultTy = llvm::cast<ShapedType>(op.getType());
-
-    if (inputTy.getElementType() != resultTy.getElementType())
-      return rewriter.notifyMatchFailure(op, "element type does not match.");
-
-    // Check if input is constant
-    DenseElementsAttr inputAttr;
-    if (!matchPattern(input, m_Constant(&inputAttr)))
-      return rewriter.notifyMatchFailure(op, "Non-constant input.");
-
-    // Check if has >1 consumer and is not splat
-    if (!input.hasOneUse() && !inputAttr.isSplat())
-      return rewriter.notifyMatchFailure(op,
-                                         "Used more than once or not-splat");
-
-    // Build new const op with correct output shape
-    DenseElementsAttr outputAttr = inputAttr.reshape(
-        llvm::cast<ShapedType>(inputAttr.getType()).clone(op.getNewShape()));
-    rewriter.replaceOpWithNewOp<tosa::ConstOp>(op, resultTy, outputAttr);
-    return success();
-  }
-};
-
-void ReshapeOp::getCanonicalizationPatterns(RewritePatternSet &results,
-                                            MLIRContext *context) {
-  results.add<ReshapeReshapeOptimization>(context);
-  results.add<ReshapeConstOptimization>(context);
-}
-
 LogicalResult SelectOp::canonicalize(SelectOp op, PatternRewriter &rewriter) {
   auto notOp = op.getPred().getDefiningOp<tosa::LogicalNotOp>();
   if (!notOp)
     return failure();
-  rewriter.updateRootInPlace(op, [&]() {
+  rewriter.modifyOpInPlace(op, [&]() {
     op.getOperation()->setOperands(
         {notOp.getInput1(), op.getOnFalse(), op.getOnTrue()});
   });
@@ -339,13 +285,12 @@ struct ClampIsNoOp : public OpRewritePattern<tosa::ClampOp> {
       return failure();
     }
 
-    if (inputElementType.isF32()) {
+    if (isa<FloatType>(inputElementType)) {
+      // Unlike integer types, floating point types can represent infinity.
       auto minClamp = op.getMinFp();
       auto maxClamp = op.getMaxFp();
-      bool isMin = (minClamp.isLargest() || minClamp.isInfinity()) &&
-                   minClamp.isNegative();
-      bool isMax = (maxClamp.isLargest() || maxClamp.isInfinity()) &&
-                   !maxClamp.isNegative();
+      bool isMin = minClamp.isInfinity() && minClamp.isNegative();
+      bool isMax = maxClamp.isInfinity() && !maxClamp.isNegative();
 
       if (isMin && isMax) {
         rewriter.replaceOp(op, input);
@@ -463,13 +408,12 @@ struct ConcatSliceOptimization : public OpRewritePattern<tosa::SliceOp> {
 
       if (sliceStart[axis] >= 0 &&
           (sliceStart[axis] + sliceSize[axis]) <= inputType.getDimSize(axis)) {
-        replaceWithSlice =
-            rewriter
-                .create<tosa::SliceOp>(
-                    sliceOp.getLoc(), sliceOp.getType(), input,
-                    rewriter.getDenseI64ArrayAttr(sliceOp.getStart()),
-                    rewriter.getDenseI64ArrayAttr(sliceSize))
-                .getResult();
+        replaceWithSlice = rewriter
+                               .create<tosa::SliceOp>(
+                                   sliceOp.getLoc(), sliceOp.getType(), input,
+                                   rewriter.getDenseI64ArrayAttr(sliceStart),
+                                   rewriter.getDenseI64ArrayAttr(sliceSize))
+                               .getResult();
         break;
       }
       sliceStart[axis] -= inputType.getDimSize(axis);
@@ -561,6 +505,19 @@ OpFoldResult AddOp::fold(FoldAdaptor adaptor) {
 
   return binaryFolder<std::plus<APInt>, std::plus<APFloat>>(lhsAttr, rhsAttr,
                                                             resultTy);
+}
+
+OpFoldResult ArgMaxOp::fold(FoldAdaptor adaptor) {
+  auto inputTy = llvm::dyn_cast<RankedTensorType>(getInput().getType());
+  auto outputTy = llvm::dyn_cast<RankedTensorType>(getType());
+  if (!inputTy || !outputTy || !inputTy.hasStaticShape() ||
+      !outputTy.hasStaticShape())
+    return {};
+
+  if (inputTy.getDimSize(getAxis()) == 1)
+    return DenseElementsAttr::get(outputTy, 0);
+
+  return {};
 }
 
 OpFoldResult DivOp::fold(FoldAdaptor adaptor) {
@@ -829,7 +786,9 @@ OpFoldResult ConstOp::fold(FoldAdaptor adaptor) { return getValueAttr(); }
     ShapedType inputTy = llvm::cast<ShapedType>(getInput().getType());         \
     if (!inputTy.hasRank())                                                    \
       return {};                                                               \
-    if (inputTy.getDimSize(getAxis()) == 1)                                    \
+    if (inputTy != getType())                                                  \
+      return {};                                                               \
+    if (inputTy.getRank() == 0 || inputTy.getDimSize(getAxis()) == 1)          \
       return getInput();                                                       \
     return {};                                                                 \
   }
@@ -849,12 +808,35 @@ OpFoldResult ReshapeOp::fold(FoldAdaptor adaptor) {
   if (!inputTy || !outputTy)
     return {};
 
-  if (inputTy == outputTy)
+  // Fold when the input and output types are the same. This is only safe when
+  // there is at most 1 dynamic dimension. For 2 or more dynamic dimensions,
+  // there may still be a productive reshape.
+  if (inputTy == outputTy && inputTy.getNumDynamicDims() < 2)
     return getInput1();
 
-  auto operand = llvm::dyn_cast_if_present<DenseElementsAttr>(adaptor.getInput1());
-  if (operand && outputTy.hasStaticShape() && operand.isSplat()) {
-    return SplatElementsAttr::get(outputTy, operand.getSplatValue<Attribute>());
+  // reshape(reshape(x)) -> reshape(x)
+  if (auto reshapeOp = llvm::dyn_cast_if_present<tosa::ReshapeOp>(
+          getInput1().getDefiningOp())) {
+    getInput1Mutable().assign(reshapeOp.getInput1());
+    return getResult();
+  }
+
+  // reshape(const(x)) -> const(reshape-attr(x))
+  if (auto operand = llvm::dyn_cast_if_present<DenseElementsAttr>(adaptor.getInput1())) {
+    // Constants must have static shape.
+    if (!outputTy.hasStaticShape())
+      return {};
+
+    // Okay to duplicate splat constants.
+    if (operand.isSplat())
+      return SplatElementsAttr::get(outputTy, operand.getSplatValue<Attribute>());
+
+    // Don't duplicate other constants.
+    if (!getInput1().hasOneUse())
+      return {};
+
+    return operand.reshape(
+        llvm::cast<ShapedType>(operand.getType()).clone(getNewShape()));
   }
 
   return {};
@@ -912,7 +894,8 @@ OpFoldResult ReverseOp::fold(FoldAdaptor adaptor) {
     return operandAttr;
 
   // If the dim-length is 1, tosa.reverse is a no-op.
-  if (operandTy.hasRank() && operandTy.getDimSize(axis) == 1)
+  if (operandTy.hasRank() &&
+      (operandTy.getRank() == 0 || operandTy.getDimSize(axis) == 1))
     return operand;
 
   return {};
@@ -1070,4 +1053,22 @@ OpFoldResult ConcatOp::fold(FoldAdaptor adaptor) {
 
   getOperation()->setOperands(concatOperands);
   return getResult();
+}
+
+OpFoldResult tosa::ReciprocalOp::fold(FoldAdaptor adaptor) {
+  auto input = adaptor.getInput1();
+
+  auto inputAttr = llvm::dyn_cast_if_present<DenseElementsAttr>(input);
+  // Fold splat inputs only.
+  if (!inputAttr || !inputAttr.isSplat())
+    return {};
+
+  auto shapeType = llvm::cast<ShapedType>(getType());
+  if (auto floatType = llvm::dyn_cast<FloatType>(inputAttr.getElementType())) {
+    auto floatVal = inputAttr.getSplatValue<APFloat>();
+    return DenseElementsAttr::get(shapeType,
+                                  ReciprocalOp::calcOneElement(floatVal));
+  }
+
+  return {};
 }

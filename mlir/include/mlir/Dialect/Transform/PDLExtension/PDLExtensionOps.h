@@ -11,7 +11,7 @@
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
-#include "mlir/Dialect/Transform/IR/TransformInterfaces.h"
+#include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/SymbolTable.h"
@@ -27,6 +27,8 @@ namespace transform {
 /// populated by extensions.
 class PDLMatchHooks : public TransformDialectData<PDLMatchHooks> {
 public:
+  PDLMatchHooks(MLIRContext *ctx) : TransformDialectData(ctx) {}
+
   /// Takes ownership of the named PDL constraint function from the given
   /// map and makes them available for use by the operations in the dialect.
   void

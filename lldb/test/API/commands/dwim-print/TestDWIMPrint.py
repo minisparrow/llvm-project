@@ -138,3 +138,23 @@ class TestCase(TestBase):
         self.runCmd("type summary add -e -s 'stub summary' Structure")
         self._expect_cmd(f"dwim-print s", "frame variable")
         self._expect_cmd(f"dwim-print (struct Structure)s", "expression")
+
+    def test_void_result(self):
+        """Test dwim-print does not surface an error message for void expressions."""
+        self.build()
+        lldbutil.run_to_source_breakpoint(
+            self, "// break here", lldb.SBFileSpec("main.c")
+        )
+        self.expect("dwim-print (void)15", matching=False, patterns=["(?i)error"])
+
+    def test_preserves_persistent_variables(self):
+        """Test dwim-print does not delete persistent variables."""
+        self.build()
+        lldbutil.run_to_source_breakpoint(
+            self, "// break here", lldb.SBFileSpec("main.c")
+        )
+        self.expect("dwim-print int $i = 15")
+        # Run the same expression twice and verify success. This ensures the
+        # first command does not delete the persistent variable.
+        for _ in range(2):
+            self.expect("dwim-print $i", startstr="(int) 15")

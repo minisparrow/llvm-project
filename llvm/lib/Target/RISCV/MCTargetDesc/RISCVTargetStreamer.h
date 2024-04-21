@@ -17,8 +17,24 @@ namespace llvm {
 
 class formatted_raw_ostream;
 
+enum class RISCVOptionArchArgType {
+  Full,
+  Plus,
+  Minus,
+};
+
+struct RISCVOptionArchArg {
+  RISCVOptionArchArgType Type;
+  std::string Value;
+
+  RISCVOptionArchArg(RISCVOptionArchArgType Type, std::string Value)
+      : Type(Type), Value(Value) {}
+};
+
 class RISCVTargetStreamer : public MCTargetStreamer {
   RISCVABI::ABI TargetABI = RISCVABI::ABI_Unknown;
+  bool HasRVC = false;
+  bool HasTSO = false;
 
 public:
   RISCVTargetStreamer(MCStreamer &S);
@@ -33,14 +49,8 @@ public:
   virtual void emitDirectiveOptionNoRVC();
   virtual void emitDirectiveOptionRelax();
   virtual void emitDirectiveOptionNoRelax();
+  virtual void emitDirectiveOptionArch(ArrayRef<RISCVOptionArchArg> Args);
   virtual void emitDirectiveVariantCC(MCSymbol &Symbol);
-  virtual void emitDirectiveOptionArchFullArch(StringRef Value,
-                                               bool &PrefixEmitted);
-  virtual void emitDirectiveOptionArchPlus(StringRef Value, bool &PrefixEmitted,
-                                           bool EmitComma);
-  virtual void emitDirectiveOptionArchMinus(StringRef Value,
-                                            bool &PrefixEmitted,
-                                            bool EmitComma);
   virtual void emitAttribute(unsigned Attribute, unsigned Value);
   virtual void finishAttributeSection();
   virtual void emitTextAttribute(unsigned Attribute, StringRef String);
@@ -50,6 +60,9 @@ public:
   void emitTargetAttributes(const MCSubtargetInfo &STI, bool EmitStackAlign);
   void setTargetABI(RISCVABI::ABI ABI);
   RISCVABI::ABI getTargetABI() const { return TargetABI; }
+  void setFlagsFromFeatures(const MCSubtargetInfo &STI);
+  bool hasRVC() const { return HasRVC; }
+  bool hasTSO() const { return HasTSO; }
 };
 
 // This part is for ascii assembly output
@@ -73,13 +86,8 @@ public:
   void emitDirectiveOptionNoRVC() override;
   void emitDirectiveOptionRelax() override;
   void emitDirectiveOptionNoRelax() override;
+  void emitDirectiveOptionArch(ArrayRef<RISCVOptionArchArg> Args) override;
   void emitDirectiveVariantCC(MCSymbol &Symbol) override;
-  void emitDirectiveOptionArchFullArch(StringRef Value,
-                                       bool &PrefixEmitted) override;
-  void emitDirectiveOptionArchPlus(StringRef Value, bool &PrefixEmitted,
-                                   bool EmitComma) override;
-  void emitDirectiveOptionArchMinus(StringRef Value, bool &PrefixEmitted,
-                                    bool EmitComma) override;
 };
 
 }

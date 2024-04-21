@@ -12,6 +12,7 @@
 #include "flang/Evaluate/call.h"
 #include "flang/Evaluate/expression.h"
 #include "flang/Evaluate/tools.h"
+#include "flang/Evaluate/traverse.h"
 #include "flang/Parser/message.h"
 #include "flang/Parser/parse-tree-visitor.h"
 #include "flang/Parser/tools.h"
@@ -90,9 +91,16 @@ public:
       : context_{context}, doConcurrentSourcePosition_{
                                doConcurrentSourcePosition} {}
   std::set<parser::Label> labels() { return labels_; }
-  template <typename T> bool Pre(const T &) { return true; }
-  template <typename T> void Post(const T &) {}
-
+  template <typename T> bool Pre(const T &x) {
+    if (const auto *expr{GetExpr(context_, x)}) {
+      if (auto bad{FindImpureCall(context_.foldingContext(), *expr)}) {
+        context_.Say(currentStatementSourcePosition_,
+            "Impure procedure '%s' may not be referenced in DO CONCURRENT"_err_en_US,
+            *bad);
+      }
+    }
+    return true;
+  }
   template <typename T> bool Pre(const parser::Statement<T> &statement) {
     currentStatementSourcePosition_ = statement.source;
     if (statement.label.has_value()) {
@@ -100,11 +108,21 @@ public:
     }
     return true;
   }
-
   template <typename T> bool Pre(const parser::UnlabeledStatement<T> &stmt) {
     currentStatementSourcePosition_ = stmt.source;
     return true;
   }
+  bool Pre(const parser::CallStmt &x) {
+    if (x.typedCall.get()) {
+      if (auto bad{FindImpureCall(context_.foldingContext(), *x.typedCall)}) {
+        context_.Say(currentStatementSourcePosition_,
+            "Impure procedure '%s' may not be referenced in DO CONCURRENT"_err_en_US,
+            *bad);
+      }
+    }
+    return true;
+  }
+  template <typename T> void Post(const T &) {}
 
   // C1140 -- Can't deallocate a polymorphic entity in a DO CONCURRENT.
   // Deallocation can be caused by exiting a block that declares an allocatable
@@ -202,8 +220,11 @@ public:
       if (MightDeallocatePolymorphic(*entity, DeallocateNonCoarray)) {
         SayDeallocateOfPolymorph(variable.GetSource(), *entity, reason);
       }
-      if (const Symbol * impure{HasImpureFinal(*entity)}) {
-        SayDeallocateWithImpureFinal(*entity, reason, *impure);
+      if (const auto *assignment{GetAssignment(stmt)}) {
+        const auto &lhs{assignment->lhs};
+        if (const Symbol * impure{HasImpureFinal(*entity, lhs.Rank())}) {
+          SayDeallocateWithImpureFinal(*entity, reason, *impure);
+        }
       }
     }
     if (const auto *assignment{GetAssignment(stmt)}) {
@@ -271,12 +292,6 @@ public:
   // not pure, and impure procedures are caught by checks for constraint C1139
   void Post(const parser::ProcedureDesignator &procedureDesignator) {
     if (auto *name{std::get_if<parser::Name>(&procedureDesignator.u)}) {
-      if (name->symbol && !IsPureProcedure(*name->symbol)) {
-        SayWithDo(context_, currentStatementSourcePosition_,
-            "Call to an impure procedure is not allowed in DO"
-            " CONCURRENT"_err_en_US,
-            doConcurrentSourcePosition_);
-      }
       if (name->symbol &&
           fromScope(*name->symbol, "__fortran_ieee_exceptions"s)) {
         if (name->source == "ieee_set_halting_mode") {
@@ -285,16 +300,6 @@ public:
               "CONCURRENT"_err_en_US,
               doConcurrentSourcePosition_);
         }
-      }
-    } else {
-      // C1139: this a procedure component
-      auto &component{std::get<parser::ProcComponentRef>(procedureDesignator.u)
-                          .v.thing.component};
-      if (component.symbol && !IsPureProcedure(*component.symbol)) {
-        SayWithDo(context_, currentStatementSourcePosition_,
-            "Call to an impure procedure component is not allowed"
-            " in DO CONCURRENT"_err_en_US,
-            doConcurrentSourcePosition_);
       }
     }
   }
@@ -411,13 +416,11 @@ public:
   void Check(const parser::DoConstruct &doConstruct) {
     if (doConstruct.IsDoConcurrent()) {
       CheckDoConcurrent(doConstruct);
-      return;
-    }
-    if (doConstruct.IsDoNormal()) {
+    } else if (doConstruct.IsDoNormal()) {
       CheckDoNormal(doConstruct);
-      return;
+    } else {
+      // TODO: handle the other cases
     }
-    // TODO: handle the other cases
   }
 
   void Check(const parser::ForallStmt &stmt) {
@@ -435,6 +438,18 @@ public:
       CheckForallIndexesUsed(*assignment);
       CheckForImpureCall(assignment->lhs);
       CheckForImpureCall(assignment->rhs);
+
+      if (IsVariable(assignment->lhs)) {
+        if (const Symbol * symbol{GetLastSymbol(assignment->lhs)}) {
+          if (auto impureFinal{
+                  HasImpureFinal(*symbol, assignment->lhs.Rank())}) {
+            context_.SayWithDecl(*symbol, parser::FindSourceLocation(stmt),
+                "Impure procedure '%s' is referenced by finalization in a %s"_err_en_US,
+                impureFinal->name(), LoopKindName());
+          }
+        }
+      }
+
       if (const auto *proc{
               std::get_if<evaluate::ProcedureRef>(&assignment->u)}) {
         CheckForImpureCall(*proc);
@@ -650,9 +665,11 @@ private:
     for (auto &ls : localitySpecs) {
       if (std::holds_alternative<parser::LocalitySpec::DefaultNone>(ls.u)) {
         if (hasDefaultNone) {
-          // C1127, you can only have one DEFAULT(NONE)
-          context_.Say(currentStatementSourcePosition_,
-              "Only one DEFAULT(NONE) may appear"_port_en_US);
+          // F'2023 C1129, you can only have one DEFAULT(NONE)
+          if (context_.ShouldWarn(common::LanguageFeature::BenignRedundancy)) {
+            context_.Say(currentStatementSourcePosition_,
+                "Only one DEFAULT(NONE) may appear"_port_en_US);
+          }
           break;
         }
         hasDefaultNone = true;
@@ -975,7 +992,7 @@ static void CheckIfArgIsDoVar(const evaluate::ActualArgument &arg,
 void DoForallChecker::Leave(const parser::CallStmt &callStmt) {
   if (const auto &typedCall{callStmt.typedCall}) {
     const auto &parsedArgs{
-        std::get<std::list<parser::ActualArgSpec>>(callStmt.v.t)};
+        std::get<std::list<parser::ActualArgSpec>>(callStmt.call.t)};
     auto parsedArgIter{parsedArgs.begin()};
     const evaluate::ActualArguments &checkedArgs{typedCall->arguments()};
     for (const auto &checkedOptionalArg : checkedArgs) {

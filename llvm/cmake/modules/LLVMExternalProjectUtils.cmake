@@ -83,7 +83,7 @@ function(llvm_ExternalProject_Add name source_dir)
     set(target_triple ${ARG_TARGET_TRIPLE})
   endif()
 
-  is_msvc_triple(is_msvc_target ${target_triple})
+  is_msvc_triple(is_msvc_target "${target_triple}")
 
   if(NOT ARG_TOOLCHAIN_TOOLS)
     set(ARG_TOOLCHAIN_TOOLS clang)
@@ -280,7 +280,11 @@ function(llvm_ExternalProject_Add name source_dir)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
       string(REGEX MATCH "^[0-9]+" CLANG_VERSION_MAJOR
              ${PACKAGE_VERSION})
-      set(resource_dir "${LLVM_LIBRARY_DIR}/clang/${CLANG_VERSION_MAJOR}")
+      if(DEFINED CLANG_RESOURCE_DIR AND NOT CLANG_RESOURCE_DIR STREQUAL "")
+        set(resource_dir ${LLVM_TOOLS_BINARY_DIR}/${CLANG_RESOURCE_DIR})
+      else()
+        set(resource_dir "${LLVM_LIBRARY_DIR}/clang/${CLANG_VERSION_MAJOR}")
+      endif()
       set(flag_types ASM C CXX MODULE_LINKER SHARED_LINKER EXE_LINKER)
       foreach(type ${flag_types})
         set(${type}_flag -DCMAKE_${type}_FLAGS=-resource-dir=${resource_dir})
@@ -315,6 +319,10 @@ function(llvm_ExternalProject_Add name source_dir)
     list(APPEND compiler_args -DCMAKE_ASM_COMPILER_TARGET=${ARG_TARGET_TRIPLE})
   endif()
 
+  if(CMAKE_VERBOSE_MAKEFILE)
+    set(verbose -DCMAKE_VERBOSE_MAKEFILE=ON)
+  endif()
+
   ExternalProject_Add(${name}
     DEPENDS ${ARG_DEPENDS} llvm-config
     ${name}-clobber
@@ -326,6 +334,7 @@ function(llvm_ExternalProject_Add name source_dir)
     CMAKE_ARGS ${${nameCanon}_CMAKE_ARGS}
                --no-warn-unused-cli
                ${compiler_args}
+               ${verbose}
                -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
                ${sysroot_arg}
                -DLLVM_BINARY_DIR=${PROJECT_BINARY_DIR}

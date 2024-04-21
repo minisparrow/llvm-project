@@ -127,6 +127,7 @@ struct AArch64MIPeepholeOpt : public MachineFunctionPass {
   bool visitINSERT(MachineInstr &MI);
   bool visitINSviGPR(MachineInstr &MI, unsigned Opc);
   bool visitINSvi64lane(MachineInstr &MI);
+  bool visitFMOVDr(MachineInstr &MI);
   bool runOnMachineFunction(MachineFunction &MF) override;
 
   StringRef getPassName() const override {
@@ -612,7 +613,7 @@ bool AArch64MIPeepholeOpt::visitINSviGPR(MachineInstr &MI, unsigned Opc) {
 // register.
 static bool is64bitDefwithZeroHigh64bit(MachineInstr *MI,
                                         MachineRegisterInfo *MRI) {
-  if (!MI->getOperand(0).isDef() || !MI->getOperand(0).isReg())
+  if (!MI->getOperand(0).isReg() || !MI->getOperand(0).isDef())
     return false;
   const TargetRegisterClass *RC = MRI->getRegClass(MI->getOperand(0).getReg());
   if (RC != &AArch64::FPR64RegClass)
@@ -663,6 +664,26 @@ bool AArch64MIPeepholeOpt::visitINSvi64lane(MachineInstr &MI) {
   // Let's remove MIs for high 64-bits.
   Register OldDef = MI.getOperand(0).getReg();
   Register NewDef = MI.getOperand(1).getReg();
+  MRI->constrainRegClass(NewDef, MRI->getRegClass(OldDef));
+  MRI->replaceRegWith(OldDef, NewDef);
+  MI.eraseFromParent();
+
+  return true;
+}
+
+bool AArch64MIPeepholeOpt::visitFMOVDr(MachineInstr &MI) {
+  // An FMOVDr sets the high 64-bits to zero implicitly, similar to ORR for GPR.
+  MachineInstr *Low64MI = MRI->getUniqueVRegDef(MI.getOperand(1).getReg());
+  if (!Low64MI || !is64bitDefwithZeroHigh64bit(Low64MI, MRI))
+    return false;
+
+  // Let's remove MIs for high 64-bits.
+  Register OldDef = MI.getOperand(0).getReg();
+  Register NewDef = MI.getOperand(1).getReg();
+  LLVM_DEBUG(dbgs() << "Removing: " << MI << "\n");
+  MRI->clearKillFlags(OldDef);
+  MRI->clearKillFlags(NewDef);
+  MRI->constrainRegClass(NewDef, MRI->getRegClass(OldDef));
   MRI->replaceRegWith(OldDef, NewDef);
   MI.eraseFromParent();
 
@@ -746,6 +767,9 @@ bool AArch64MIPeepholeOpt::runOnMachineFunction(MachineFunction &MF) {
         break;
       case AArch64::INSvi64lane:
         Changed |= visitINSvi64lane(MI);
+        break;
+      case AArch64::FMOVDr:
+        Changed |= visitFMOVDr(MI);
         break;
       }
     }

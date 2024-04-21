@@ -374,6 +374,7 @@ bool trackExpressionValue(const ExplodedNode *N, const Expr *E,
 /// from.
 ///
 /// \param V We're searching for the store where \c R received this value.
+///        It may be either defined or undefined, but should not be unknown.
 /// \param R The region we're tracking.
 /// \param Opts Tracking options specifying how we want to track the value.
 /// \param Origin Only adds notes when the last store happened in a
@@ -383,7 +384,7 @@ bool trackExpressionValue(const ExplodedNode *N, const Expr *E,
 ///        changes to its value in a nested stackframe could be pruned, and
 ///        this visitor can prevent that without polluting the bugpath too
 ///        much.
-void trackStoredValue(KnownSVal V, const MemRegion *R,
+void trackStoredValue(SVal V, const MemRegion *R,
                       PathSensitiveBugReport &Report, TrackingOptions Opts = {},
                       const StackFrameContext *Origin = nullptr);
 
@@ -392,19 +393,19 @@ const Expr *getDerefExpr(const Stmt *S);
 } // namespace bugreporter
 
 class TrackConstraintBRVisitor final : public BugReporterVisitor {
-  DefinedSVal Constraint;
-  bool Assumption;
+  const SmallString<64> Message;
+  const DefinedSVal Constraint;
+  const bool Assumption;
   bool IsSatisfied = false;
-  bool IsZeroCheck;
 
   /// We should start tracking from the last node along the path in which the
   /// value is constrained.
   bool IsTrackingTurnedOn = false;
 
 public:
-  TrackConstraintBRVisitor(DefinedSVal constraint, bool assumption)
-      : Constraint(constraint), Assumption(assumption),
-        IsZeroCheck(!Assumption && isa<Loc>(Constraint)) {}
+  TrackConstraintBRVisitor(DefinedSVal constraint, bool assumption,
+                           StringRef Message)
+      : Message(Message), Constraint(constraint), Assumption(assumption) {}
 
   void Profile(llvm::FoldingSetNodeID &ID) const override;
 
@@ -417,6 +418,9 @@ public:
                                    PathSensitiveBugReport &BR) override;
 
 private:
+  /// Checks if the constraint refers to a null-location.
+  bool isZeroCheck() const;
+
   /// Checks if the constraint is valid in the current state.
   bool isUnderconstrained(const ExplodedNode *N) const;
 };

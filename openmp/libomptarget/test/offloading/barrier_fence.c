@@ -1,8 +1,14 @@
 // RUN: %libomptarget-compile-generic -fopenmp-offload-mandatory -O3
 // RUN: %libomptarget-run-generic
+// RUN: %libomptarget-compileopt-generic -fopenmp-offload-mandatory -O3
+// RUN: %libomptarget-run-generic
 
+// UNSUPPORTED: aarch64-unknown-linux-gnu
+// UNSUPPORTED: aarch64-unknown-linux-gnu-LTO
 // UNSUPPORTED: x86_64-pc-linux-gnu
 // UNSUPPORTED: x86_64-pc-linux-gnu-LTO
+// UNSUPPORTED: s390x-ibm-linux-gnu
+// UNSUPPORTED: s390x-ibm-linux-gnu-LTO
 
 #include <omp.h>
 #include <stdio.h>

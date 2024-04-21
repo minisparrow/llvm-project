@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 // UNSUPPORTED: c++03, c++11, c++14, c++17
+// UNSUPPORTED: GCC-ALWAYS_INLINE-FIXME
 
 // <format>
 
@@ -29,6 +30,7 @@
 #include <cassert>
 #include <concepts>
 #include <iterator>
+#include <memory>
 #include <type_traits>
 
 #include "test_format_context.h"
@@ -44,8 +46,9 @@ void test(StringT expected, StringViewT fmt, ArithmeticT arg, std::size_t offset
   std::formatter<ArithmeticT, CharT> formatter;
   static_assert(std::semiregular<decltype(formatter)>);
 
-  auto it = formatter.parse(parse_ctx);
-  assert(it == fmt.end() - offset);
+  std::same_as<typename StringViewT::iterator> auto it = formatter.parse(parse_ctx);
+  // std::to_address works around LWG3989 and MSVC STL's iterator debugging mechanism.
+  assert(std::to_address(it) == std::to_address(fmt.end()) - offset);
 
   StringT result;
   auto out = std::back_inserter(result);

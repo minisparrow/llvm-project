@@ -14,10 +14,10 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/Dialect/Tensor/TransformOps/TensorTransformOps.h"
 #include "mlir/Dialect/Tensor/Transforms/TransformUtils.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
-#include "mlir/Dialect/Transform/IR/TransformInterfaces.h"
+#include "mlir/Dialect/Transform/IR/TransformOps.h"
+#include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -32,8 +32,8 @@ struct TestTensorTransforms
   TestTensorTransforms(const TestTensorTransforms &pass) : PassWrapper(pass) {}
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry
-        .insert<arith::ArithDialect, scf::SCFDialect, linalg::LinalgDialect>();
+    registry.insert<arith::ArithDialect, scf::SCFDialect, linalg::LinalgDialect,
+                    transform::TransformDialect>();
   }
 
   StringRef getArgument() const final {
@@ -62,14 +62,15 @@ struct TestTensorTransforms
                      "with loop nest"),
       llvm::cl::init(false)};
 
+  Option<bool> testDropRedundantInsertSliceRankExpansion{
+      *this, "test-drop-redundant-insert-slice-rank-expansion",
+      llvm::cl::desc("Test dropping redundant insert_slice rank expansions"),
+      llvm::cl::init(false)};
+
   Option<bool> testReassociativeReshapeFolding{
       *this, "test-reassociative-reshape-folding",
       llvm::cl::desc("Test folding of expand_shape/collapse_shape"),
       llvm::cl::init(false)};
-
-  Option<bool> testEmptyOpFolding{
-      *this, "test-empty-op-folding",
-      llvm::cl::desc("Test folding of tensor.empty"), llvm::cl::init(false)};
 
   Option<bool> testFoldIntoPackAndUnpack{
       *this, "test-fold-into-pack-and-unpack",
@@ -83,9 +84,9 @@ struct TestTensorTransforms
           "the extract_slice of collapse_shape pattern"),
       llvm::cl::init(false)};
 
-  Option<bool> testSimplifyPackPatterns{
-      *this, "test-simplify-pack-patterns",
-      llvm::cl::desc("Test patterns to simplify tensor.pack"),
+  Option<bool> testSimplifyPackUnpackPatterns{
+      *this, "test-simplify-pack-unpack-patterns",
+      llvm::cl::desc("Test patterns to simplify tensor.pack and tensor.unpack"),
       llvm::cl::init(false)};
 
   Option<bool> testTrackingListener{
@@ -98,12 +99,6 @@ struct TestTensorTransforms
 static void applyReassociativeReshapeFoldingPatterns(Operation *rootOp) {
   RewritePatternSet patterns(rootOp->getContext());
   tensor::populateReassociativeReshapeFoldingPatterns(patterns);
-  (void)applyPatternsAndFoldGreedily(rootOp, std::move(patterns));
-}
-
-static void applyEmptyOpFoldingPatterns(Operation *rootOp) {
-  RewritePatternSet patterns(rootOp->getContext());
-  tensor::populateFoldTensorEmptyPatterns(patterns);
   (void)applyPatternsAndFoldGreedily(rootOp, std::move(patterns));
 }
 
@@ -135,9 +130,16 @@ static void applyFoldConsecutiveInsertExtractSlicePatterns(Operation *rootOp) {
   (void)applyPatternsAndFoldGreedily(rootOp, std::move(patterns));
 }
 
-static void applySimplifyPackPatterns(Operation *rootOp) {
+static void
+applyDropRedundantInsertSliceRankExpansionPatterns(Operation *rootOp) {
   RewritePatternSet patterns(rootOp->getContext());
-  tensor::populateSimplifyTensorPack(patterns);
+  tensor::populateDropRedundantInsertSliceRankExpansionPatterns(patterns);
+  (void)applyPatternsAndFoldGreedily(rootOp, std::move(patterns));
+}
+
+static void applySimplifyPackUnpackPatterns(Operation *rootOp) {
+  RewritePatternSet patterns(rootOp->getContext());
+  tensor::populateSimplifyPackAndUnpackPatterns(patterns);
   (void)applyPatternsAndFoldGreedily(rootOp, std::move(patterns));
 }
 
@@ -284,13 +286,16 @@ applyRewriteExtractFromCollapseShapePatterns(Operation *rootOp,
 }
 
 namespace {
-class DummyTrackingListener : public tensor::TrackingListener {
+class DummyTrackingListener : public transform::TrackingListener {
 public:
-  using tensor::TrackingListener::TrackingListener;
+  using transform::TrackingListener::TrackingListener;
 
   // Expose `findReplacementOp` as a public function, so that it can be tested.
   Operation *getReplacementOp(Operation *op, ValueRange newValues) const {
-    return findReplacementOp(op, newValues);
+    Operation *replacementOp;
+    if (!findReplacementOp(replacementOp, op, newValues).succeeded())
+      return nullptr;
+    return replacementOp;
   }
 };
 } // namespace
@@ -312,7 +317,7 @@ static LogicalResult testTrackingListenerReplacements(Operation *rootOp) {
   if (status.wasInterrupted())
     return failure();
   if (!replaced) {
-    replaced->emitError("could not find 'replaced' op");
+    rootOp->emitError("could not find 'replaced' op");
     return failure();
   }
 
@@ -347,8 +352,18 @@ static LogicalResult testTrackingListenerReplacements(Operation *rootOp) {
   transform::TransformState transformState =
       transform::detail::makeTransformStateForTesting(/*region=*/nullptr,
                                                       /*payloadRoot=*/nullptr);
-  DummyTrackingListener listener(transformState,
-                                 transform::TransformOpInterface());
+  MLIRContext *context = rootOp->getContext();
+  OpBuilder builder(context);
+  OwningOpRef<transform::NamedSequenceOp> transformOp =
+      builder.create<transform::NamedSequenceOp>(
+          rootOp->getLoc(),
+          /*sym_name=*/"test_sequence",
+          /*function_type=*/
+          TypeAttr::get(FunctionType::get(context, TypeRange{}, TypeRange{})),
+          /*sym_visibility*/ StringAttr::get(context, "public"),
+          /*arg_attrs=*/ArrayAttr::get(context, ArrayRef<Attribute>()),
+          /*res_attrs=*/ArrayAttr::get(context, ArrayRef<Attribute>()));
+  DummyTrackingListener listener(transformState, transformOp.get());
   Operation *replacement = listener.getReplacementOp(replaced, replacements);
   if (!replacement) {
     replaced->emitError("listener could not find replacement op");
@@ -361,16 +376,16 @@ static LogicalResult testTrackingListenerReplacements(Operation *rootOp) {
 
 void TestTensorTransforms::runOnOperation() {
   Operation *rootOp = getOperation();
-  if (testSimplifyPackPatterns)
-    applySimplifyPackPatterns(rootOp);
+  if (testSimplifyPackUnpackPatterns)
+    applySimplifyPackUnpackPatterns(rootOp);
   if (testFoldConstantExtractSlice)
     applyFoldConstantExtractSlicePatterns(rootOp);
   if (testFoldConsecutiveInsertExtractSlice)
     applyFoldConsecutiveInsertExtractSlicePatterns(rootOp);
+  if (testDropRedundantInsertSliceRankExpansion)
+    applyDropRedundantInsertSliceRankExpansionPatterns(rootOp);
   if (testReassociativeReshapeFolding)
     applyReassociativeReshapeFoldingPatterns(rootOp);
-  if (testEmptyOpFolding)
-    applyEmptyOpFoldingPatterns(rootOp);
   if (testFoldIntoPackAndUnpack)
     applyFoldIntoPackAndUnpackPatterns(rootOp);
   if (testRewriteExtractSliceWithTiledCollapseShape) {
