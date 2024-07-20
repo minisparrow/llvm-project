@@ -88,8 +88,7 @@ static MCInstPrinter *createAMDGPUMCInstPrinter(const Triple &T,
                                                 const MCRegisterInfo &MRI) {
   if (T.getArch() == Triple::r600)
     return new R600InstPrinter(MAI, MII, MRI);
-  else
-    return new AMDGPUInstPrinter(MAI, MII, MRI);
+  return new AMDGPUInstPrinter(MAI, MII, MRI);
 }
 
 static MCTargetStreamer *createAMDGPUAsmTargetStreamer(MCStreamer &S,
@@ -112,10 +111,9 @@ static MCTargetStreamer *createAMDGPUNullTargetStreamer(MCStreamer &S) {
 static MCStreamer *createMCStreamer(const Triple &T, MCContext &Context,
                                     std::unique_ptr<MCAsmBackend> &&MAB,
                                     std::unique_ptr<MCObjectWriter> &&OW,
-                                    std::unique_ptr<MCCodeEmitter> &&Emitter,
-                                    bool RelaxAll) {
+                                    std::unique_ptr<MCCodeEmitter> &&Emitter) {
   return createAMDGPUELFStreamer(T, Context, std::move(MAB), std::move(OW),
-                                 std::move(Emitter), RelaxAll);
+                                 std::move(Emitter));
 }
 
 namespace {
