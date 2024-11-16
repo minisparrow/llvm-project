@@ -255,7 +255,6 @@ TEST(MemProf, PortableWrapper) {
   std::string Buffer;
   llvm::raw_string_ostream OS(Buffer);
   WriteBlock.serialize(Schema, OS);
-  OS.flush();
 
   PortableMemInfoBlock ReadBlock(
       Schema, reinterpret_cast<const unsigned char *>(Buffer.data()));
@@ -269,9 +268,7 @@ TEST(MemProf, PortableWrapper) {
   EXPECT_EQ(3UL, ReadBlock.getAllocCpuId());
 }
 
-// Version0 and Version1 serialize IndexedMemProfRecord in the same format, so
-// we share one test.
-TEST(MemProf, RecordSerializationRoundTripVersion0And1) {
+TEST(MemProf, RecordSerializationRoundTripVersion1) {
   const auto Schema = llvm::memprof::getFullSchema();
 
   MemInfoBlock Info(/*size=*/16, /*access_count=*/7, /*alloc_timestamp=*/1000,
@@ -295,12 +292,11 @@ TEST(MemProf, RecordSerializationRoundTripVersion0And1) {
 
   std::string Buffer;
   llvm::raw_string_ostream OS(Buffer);
-  Record.serialize(Schema, OS, llvm::memprof::Version0);
-  OS.flush();
+  Record.serialize(Schema, OS, llvm::memprof::Version1);
 
   const IndexedMemProfRecord GotRecord = IndexedMemProfRecord::deserialize(
       Schema, reinterpret_cast<const unsigned char *>(Buffer.data()),
-      llvm::memprof::Version0);
+      llvm::memprof::Version1);
 
   EXPECT_EQ(Record, GotRecord);
 }
@@ -326,7 +322,6 @@ TEST(MemProf, RecordSerializationRoundTripVerion2) {
   std::string Buffer;
   llvm::raw_string_ostream OS(Buffer);
   Record.serialize(Schema, OS, llvm::memprof::Version2);
-  OS.flush();
 
   const IndexedMemProfRecord GotRecord = IndexedMemProfRecord::deserialize(
       Schema, reinterpret_cast<const unsigned char *>(Buffer.data()),
@@ -378,7 +373,6 @@ TEST(MemProf, RecordSerializationRoundTripVersion2HotColdSchema) {
   std::string Buffer;
   llvm::raw_string_ostream OS(Buffer);
   Record.serialize(Schema, OS, llvm::memprof::Version2);
-  OS.flush();
 
   const IndexedMemProfRecord GotRecord = IndexedMemProfRecord::deserialize(
       Schema, reinterpret_cast<const unsigned char *>(Buffer.data()),

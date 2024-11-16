@@ -705,7 +705,7 @@ Error writeImportLibrary(StringRef ImportName, StringRef Path,
         Name = std::string(SymbolName);
       } else {
         Expected<std::string> ReplacedName =
-            replace(SymbolName, E.Name, E.ExtName);
+            object::replace(SymbolName, E.Name, E.ExtName);
         if (!ReplacedName)
           return ReplacedName.takeError();
         Name.swap(*ReplacedName);
@@ -729,7 +729,10 @@ Error writeImportLibrary(StringRef ImportName, StringRef Path,
         else if (Machine == IMAGE_FILE_MACHINE_I386 &&
                  applyNameType(IMPORT_NAME_NOPREFIX, Name) == E.ImportName)
           NameType = IMPORT_NAME_NOPREFIX;
-        else if (Name == E.ImportName)
+        else if (isArm64EC(M)) {
+          NameType = IMPORT_NAME_EXPORTAS;
+          ExportName = E.ImportName;
+        } else if (Name == E.ImportName)
           NameType = IMPORT_NAME;
         else {
           Deferred D;
@@ -753,8 +756,15 @@ Error writeImportLibrary(StringRef ImportName, StringRef Path,
           }
           Name = std::move(*MangledName);
         } else if (!E.Noname && ExportName.empty()) {
+          std::optional<std::string> DemangledName =
+              getArm64ECDemangledFunctionName(Name);
+          if (!DemangledName)
+            return make_error<StringError>(
+                StringRef(Twine("Invalid ARM64EC function name '" + Name + "'")
+                              .str()),
+                object_error::parse_failed);
           NameType = IMPORT_NAME_EXPORTAS;
-          ExportName = std::move(*getArm64ECDemangledFunctionName(Name));
+          ExportName = std::move(*DemangledName);
         }
       }
 
